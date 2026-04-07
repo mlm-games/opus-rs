@@ -1,6 +1,5 @@
 use opus_rs::silk::resampler::{
-    SilkResampler, SilkResamplerDown1_6, silk_resampler_down_1_6, silk_resampler_down2,
-    silk_resampler_down2_3,
+    SilkResampler, SilkResamplerDown1_6, silk_resampler_down_1_6, silk_resampler_down2_3,
 };
 
 #[test]

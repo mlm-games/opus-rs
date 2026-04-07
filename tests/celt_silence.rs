@@ -1,4 +1,4 @@
-use opus_rs::celt::{CeltDecoder, CeltEncoder};
+use opus_rs::celt::CeltDecoder;
 use opus_rs::modes::default_mode;
 use opus_rs::range_coder::RangeCoder;
 

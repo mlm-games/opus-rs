@@ -4,13 +4,11 @@ use opus_rs::modes::default_mode;
 fn test_mdct_simple_roundtrip() {
     let mode = default_mode();
     let overlap = mode.overlap; // 120
-    let max_lm = mode.max_lm; // 4
 
     // Test with shift=1 (frame_size = 960)
     let shift = 1;
     let n = mode.mdct.n >> shift; // 960
     let n2 = n / 2; // 480
-    let frame_size = n;
 
     // Create a simple test signal - need n + overlap input samples
     let input_size = n + overlap;

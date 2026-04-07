@@ -733,8 +733,6 @@ fn bench_pvq(c: &mut Criterion) {
     // alg_quant (combined pvq_search + encode_pulses + exp_rotation)
     for &(n, k) in &[(16usize, 8i32), (64, 16)] {
         let mut x: Vec<f32> = (0..n).map(|i| (i as f32 * 0.5).sin()).collect();
-        let mode = default_mode();
-
         group.bench_with_input(
             BenchmarkId::new(format!("alg_quant/n{n}/k{k}"), ""),
             &(n, k),

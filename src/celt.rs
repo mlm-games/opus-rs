@@ -1286,7 +1286,7 @@ impl CeltEncoder {
 
         self.w_offsets[..nb_ebands].fill(0);
         let offsets = &mut self.w_offsets[..nb_ebands];
-        let mut dynalloc_logp = 6i32;
+        let dynalloc_logp = 6i32;
         let total_bits_bitres = total_bits << BITRES;
         let total_boost = 0i32;
         // Dynamic allocation: for each band, write one FALSE bit to indicate no boost.
