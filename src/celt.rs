@@ -534,13 +534,22 @@ fn comb_filter_const(
         comb_filter_const_neon(y, x, y_idx, x_idx, t, n, g10, g11, g12);
         return;
     }
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(all(target_arch = "x86_64", target_feature = "sse"))]
+    unsafe {
+        comb_filter_const_sse(y, x, y_idx, x_idx, t, n, g10, g11, g12);
+        return;
+    }
+    #[cfg(not(any(
+        target_arch = "aarch64",
+        all(target_arch = "x86_64", target_feature = "sse")
+    )))]
     {
         comb_filter_const_scalar(y, x, y_idx, x_idx, t, n, g10, g11, g12);
     }
 }
 
 #[inline]
+#[allow(dead_code)]
 fn comb_filter_const_scalar(
     y: &mut [f32],
     x: &[f32],
@@ -585,9 +594,159 @@ fn comb_filter_const_neon(
     g11: f32,
     g12: f32,
 ) {
-    // For now, use scalar version - NEON would need more complex handling
-    // due to the sliding delay line pattern
-    comb_filter_const_scalar(y, x, y_idx, x_idx, t, n, g10, g11, g12);
+    unsafe { comb_filter_const_neon_impl(y, x, y_idx, x_idx, t, n, g10, g11, g12) }
+}
+
+/// NEON-accelerated 3-tap comb filter (constant-gain inner loop).
+/// Uses vextq_f32 to reconstruct the 3 shifted delay-line windows from
+/// two overlapping loads (same window construction as the SSE version with shuffles).
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+#[allow(unsafe_op_in_unsafe_fn)]
+unsafe fn comb_filter_const_neon_impl(
+    y: &mut [f32],
+    x: &[f32],
+    y_idx: usize,
+    x_idx: usize,
+    t: usize,
+    n: usize,
+    g10: f32,
+    g11: f32,
+    g12: f32,
+) {
+    use std::arch::aarch64::*;
+
+    let g10v = vdupq_n_f32(g10);
+    let g11v = vdupq_n_f32(g11);
+    let g12v = vdupq_n_f32(g12);
+
+    let xbase = x.as_ptr().add(x_idx);
+    let ybase = y.as_mut_ptr().add(y_idx);
+
+    // x0v = {x[-t-2], x[-t-1], x[-t], x[-t+1]}
+    let mut x0v = vld1q_f32(xbase.sub(t + 2));
+
+    let mut i = 0;
+    while i + 4 <= n {
+        // x4v = {x[i-t+2], x[i-t+3], x[i-t+4], x[i-t+5]}
+        let x4v = vld1q_f32(xbase.add(i).sub(t - 2));
+
+        // Construct delay-line windows via vextq_f32 (equivalent to SSE shuffles):
+        // x2v = vext(x0v, x4v, 2) = {x0v[2], x0v[3], x4v[0], x4v[1]} → x[i-t..i-t+4]
+        let x2v = vextq_f32(x0v, x4v, 2);
+        // x1v = vext(x0v, x4v, 1) = {x0v[1], x0v[2], x0v[3], x4v[0]} → x[i-t-1..i-t+3]
+        let x1v = vextq_f32(x0v, x4v, 1);
+        // x3v = vext(x0v, x4v, 3) = {x0v[3], x4v[0], x4v[1], x4v[2]} → x[i-t+1..i-t+5]
+        let x3v = vextq_f32(x0v, x4v, 3);
+
+        let xi = vld1q_f32(xbase.add(i));
+
+        // yi = xi + g10*x2v + g11*(x1v+x3v) + g12*(x4v+x0v)
+        let mut yi = xi;
+        yi = vfmaq_f32(yi, g10v, x2v);
+        yi = vfmaq_f32(yi, g11v, vaddq_f32(x1v, x3v));
+        yi = vfmaq_f32(yi, g12v, vaddq_f32(x4v, x0v));
+        vst1q_f32(ybase.add(i), yi);
+
+        x0v = x4v;
+        i += 4;
+    }
+
+    // Scalar tail
+    let x0v_arr: [f32; 4] = std::mem::transmute(x0v);
+    let mut sx4 = x0v_arr[0];
+    let mut sx3 = x0v_arr[1];
+    let mut sx2 = x0v_arr[2];
+    let mut sx1 = x0v_arr[3];
+
+    while i < n {
+        let sx0 = x[x_idx + i - t + 2];
+        y[y_idx + i] = x[x_idx + i] + g10 * sx2 + g11 * (sx1 + sx3) + g12 * (sx0 + sx4);
+        sx4 = sx3;
+        sx3 = sx2;
+        sx2 = sx1;
+        sx1 = sx0;
+        i += 1;
+    }
+}
+
+/// SSE-accelerated 3-tap comb filter (constant-gain inner loop).
+/// Mirrors C comb_filter_const_sse from pitch_sse.c.
+/// Safety: x_idx >= t + 2 and y/x slices have n elements from y_idx/x_idx.
+#[cfg(all(target_arch = "x86_64", target_feature = "sse"))]
+#[inline(always)]
+#[allow(unsafe_op_in_unsafe_fn)]
+unsafe fn comb_filter_const_sse(
+    y: &mut [f32],
+    x: &[f32],
+    y_idx: usize,
+    x_idx: usize,
+    t: usize,
+    n: usize,
+    g10: f32,
+    g11: f32,
+    g12: f32,
+) {
+    use std::arch::x86_64::*;
+
+    let g10v = _mm_set1_ps(g10);
+    let g11v = _mm_set1_ps(g11);
+    let g12v = _mm_set1_ps(g12);
+
+    // x0v is the "left window" — 4 values ending at x[x_idx - t + 1]
+    // (positions x_idx-t-2, x_idx-t-1, x_idx-t, x_idx-t+1)
+    let xbase = x.as_ptr().add(x_idx);
+    let ybase = y.as_mut_ptr().add(y_idx);
+    let mut x0v = _mm_loadu_ps(xbase.sub(t + 2));
+
+    let mut i = 0;
+    while i + 4 <= n {
+        // x4v: 4 values starting at x[x_idx + i - t + 2]
+        let x4v = _mm_loadu_ps(xbase.add(i).sub(t - 2));
+
+        // Reconstruct the 3 delay-line windows via shuffles (avoids 3 extra loads)
+        // x2v = {x0v[2], x0v[3], x4v[0], x4v[1]} → x[i-t .. i-t+4]
+        // 0x4e = imm: result[0]=a[2], result[1]=a[3], result[2]=b[0], result[3]=b[1]
+        let x2v = _mm_shuffle_ps(x0v, x4v, 0x4e);
+        // x1v = {x0v[1], x0v[2], x2v[1], x2v[2]} → x[i-t-1 .. i-t+3] (+1 shifted)
+        // 0x99 = imm: result[0]=a[1], result[1]=a[2], result[2]=b[1], result[3]=b[2]
+        let x1v = _mm_shuffle_ps(x0v, x2v, 0x99);
+        // x3v = {x2v[1], x2v[2], x4v[1], x4v[2]} → x[i-t+1 .. i-t+5] (-1 shifted)
+        let x3v = _mm_shuffle_ps(x2v, x4v, 0x99);
+
+        // Load 4 input samples
+        let xi = _mm_loadu_ps(xbase.add(i));
+
+        // y[i..i+4] = x[i..i+4] + g10*(x2) + g11*(x1+x3) + g12*(x4+x0)
+        let mut yi = xi;
+        yi = _mm_add_ps(yi, _mm_mul_ps(g10v, x2v));
+        let yi2 = _mm_add_ps(
+            _mm_mul_ps(g11v, _mm_add_ps(x3v, x1v)),
+            _mm_mul_ps(g12v, _mm_add_ps(x4v, x0v)),
+        );
+        yi = _mm_add_ps(yi, yi2);
+        _mm_storeu_ps(ybase.add(i), yi);
+
+        x0v = x4v;
+        i += 4;
+    }
+
+    // Scalar tail
+    let x0v_arr: [f32; 4] = std::mem::transmute(x0v);
+    let mut sx4 = x0v_arr[0];
+    let mut sx3 = x0v_arr[1];
+    let mut sx2 = x0v_arr[2];
+    let mut sx1 = x0v_arr[3];
+
+    while i < n {
+        let sx0 = x[x_idx + i - t + 2];
+        y[y_idx + i] = x[x_idx + i] + g10 * sx2 + g11 * (sx1 + sx3) + g12 * (sx0 + sx4);
+        sx4 = sx3;
+        sx3 = sx2;
+        sx2 = sx1;
+        sx1 = sx0;
+        i += 1;
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
