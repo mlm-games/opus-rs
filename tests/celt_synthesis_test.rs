@@ -271,6 +271,7 @@ fn celt_energy_roundtrip_only() {
             channels,
             lm,
             false,
+            total_bits as usize,
         );
 
         // Compute allocation to get ebits

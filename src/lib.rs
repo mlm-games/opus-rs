@@ -1,3 +1,5 @@
+#![allow(unsafe_op_in_unsafe_fn)]
+
 pub mod bands;
 pub mod celt;
 pub mod celt_lpc;
@@ -25,6 +27,43 @@ use silk::log2lin::silk_log2lin;
 use silk::macros::*;
 use silk::resampler::{silk_resampler_down2, silk_resampler_down2_3};
 use silk::structs::SilkEncoderState;
+
+/// Helper for timing encoder stages. Prints breakdown on drop when STAGE_TIMING env var is set.
+pub struct StageTimerGuard<'a> {
+    times: &'a [std::sync::atomic::AtomicU64; 12],
+    count: &'a std::sync::atomic::AtomicU64,
+    #[allow(dead_code)]
+    start: std::time::Instant,
+}
+impl<'a> StageTimerGuard<'a> {
+    pub fn new(
+        times: &'a [std::sync::atomic::AtomicU64; 12],
+        count: &'a std::sync::atomic::AtomicU64,
+    ) -> Self {
+        Self { times, count, start: std::time::Instant::now() }
+    }
+}
+impl<'a> Drop for StageTimerGuard<'a> {
+    fn drop(&mut self) {
+        use std::sync::atomic::Ordering;
+        let n = self.count.fetch_add(1, Ordering::Relaxed) + 1;
+        // Print every 5000 frames
+        if n % 5000 == 0 && std::env::var("STAGE_TIMING").is_ok() {
+            let names = [
+                "preemph", "transient", "prefilter", "mdct_fwd",
+                "band_energy", "coarse_energy", "tf_spreading", "bit_alloc",
+                "fine_energy", "quant_all_bands", "energy_finalise", "synthesis_mdct_back",
+            ];
+            let total: u64 = self.times.iter().map(|t| t.load(Ordering::Relaxed)).sum();
+            eprintln!("\n=== Stage timing (avg over {} frames, total {:.1}µs) ===", n, total as f64 / n as f64 / 1000.0);
+            for (i, name) in names.iter().enumerate() {
+                let ns = self.times[i].load(Ordering::Relaxed) as f64 / n as f64;
+                let pct = if total > 0 { 100.0 * self.times[i].load(Ordering::Relaxed) as f64 / total as f64 } else { 0.0 };
+                eprintln!("  {:25}: {:6.1} µs ({:5.1}%)", name, ns / 1000.0, pct);
+            }
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Application {
@@ -78,6 +117,8 @@ pub struct OpusEncoder {
     down2_state_second: [i32; 2],
     down2_3_state: [i32; 6],
     down_1_3_state: silk::resampler::SilkResamplerDown1_3,
+    // Pre-allocated RangeCoder to avoid per-frame heap allocation
+    rc: RangeCoder,
 }
 
 /// Compute the per-channel SILK bitrate (bps) for hybrid mode, matching the reference.
@@ -240,6 +281,7 @@ impl OpusEncoder {
             down2_state_second: [0; 2],
             down2_3_state: [0; 6],
             down_1_3_state: silk::resampler::SilkResamplerDown1_3::default(),
+            rc: RangeCoder::new_encoder(1),
         })
     }
 
@@ -271,7 +313,25 @@ impl OpusEncoder {
         let frame_rate = frame_rate_from_params(self.sampling_rate, frame_size)
             .ok_or("Invalid frame size for sampling rate")?;
 
-        let mode = self.mode;
+        // Dynamic mode selection matching C opus behavior:
+        // For Audio application, switch between SILK/CELT based on bitrate threshold.
+        // At 64kbps mono, C opus uses CELT-only (threshold ~17.6kbps for mono Audio).
+        let mode = if self.application == Application::Audio && self.mode == OpusMode::Hybrid {
+            // Mode thresholds from C opus: [mono_voice=64000, mono_music=10000]
+            // For mono Audio with default voice_est=48:
+            // threshold = 10000 + 48^2 * (64000-10000)/16384 ≈ 17600
+            // At 64kbps, equiv_rate (64000) > threshold → CELT_ONLY
+            let equiv_rate = self.bitrate_bps;
+            let threshold: i32 = 17_600; // Approximate threshold for mono Audio
+            if equiv_rate >= threshold {
+                OpusMode::CeltOnly
+            } else {
+                OpusMode::Hybrid
+            }
+        } else {
+            self.mode
+        };
+
         if mode == OpusMode::CeltOnly {
             match frame_rate {
                 400 | 200 | 100 | 50 => {}
@@ -287,15 +347,16 @@ impl OpusEncoder {
         let cbr_bytes = ((target_bits + 4) / 8) as usize;
         let max_data_bytes = output.len();
 
-        let n_bytes = if self.use_cbr {
-            cbr_bytes.min(max_data_bytes).max(1)
-        } else {
-            max_data_bytes
-        };
+        // In VBR mode, cap n_bytes to the bitrate-appropriate size (matching C's
+        // IMIN(8*max_data_bytes, bitrate_to_bits(...))). This ensures the encoder
+        // and decoder agree on total_bits. VBR quality could be improved later
+        // with a reservoir mechanism + ec_enc_shrink for bursting above average.
+        let n_bytes = cbr_bytes.min(max_data_bytes).max(1);
 
         // Use n_bytes-1 as RC storage so the full buffer can be passed to the decoder.
         // This ensures encoder total_bits == decoder total_bits (no mismatch from done() overhead).
-        let mut rc = RangeCoder::new_encoder((n_bytes - 1) as u32);
+        // Reuse pre-allocated RangeCoder to avoid per-frame heap allocation.
+        self.rc.reset_for_encode((n_bytes - 1) as u32);
 
         if mode == OpusMode::SilkOnly || mode == OpusMode::Hybrid {
             let silk_fs_khz = if mode == OpusMode::Hybrid {
@@ -475,7 +536,7 @@ impl OpusEncoder {
                 &mut *self.silk_enc,
                 silk_input,
                 silk_input.len(),
-                &mut rc,
+                &mut self.rc,
                 &mut pn_bytes,
                 silk_bitrate,
                 silk_max_bits,
@@ -488,38 +549,26 @@ impl OpusEncoder {
         }
 
         if mode == OpusMode::CeltOnly || mode == OpusMode::Hybrid {
+            // Propagate complexity to CeltEncoder (controls prefilter skip at low complexity)
+            self.celt_enc.complexity = self.complexity;
             let start_band = if mode == OpusMode::Hybrid { 17 } else { 0 };
-            if mode == OpusMode::Hybrid {
-                // For Hybrid mode, pass total packet bits; clt_compute_allocation
-                // subtracts rc.tell() (= silk bits used) internally.
-                let total_packet_bits = ((n_bytes - 1) * 8) as i32;
-                self.celt_enc.encode_with_budget(
-                    input,
-                    frame_size,
-                    &mut rc,
-                    start_band,
-                    total_packet_bits,
-                );
-            } else {
-                // For CeltOnly mode, use the full packet budget
-                let total_packet_bits = ((n_bytes - 1) * 8) as i32;
-                self.celt_enc.encode_with_budget(
-                    input,
-                    frame_size,
-                    &mut rc,
-                    start_band,
-                    total_packet_bits,
-                );
-            }
+            let total_packet_bits = ((n_bytes - 1) * 8) as i32;
+            self.celt_enc.encode_with_budget(
+                input,
+                frame_size,
+                &mut self.rc,
+                start_band,
+                total_packet_bits,
+            );
         }
 
-        rc.done();
+        self.rc.done();
 
         let silk_payload: Vec<u8> = if mode == OpusMode::SilkOnly {
-            let mut combined = Vec::with_capacity(rc.storage as usize);
-            combined.extend_from_slice(&rc.buf[0..rc.offs as usize]);
+            let mut combined = Vec::with_capacity(self.rc.storage as usize);
+            combined.extend_from_slice(&self.rc.buf[0..self.rc.offs as usize]);
             combined.extend_from_slice(
-                &rc.buf[(rc.storage - rc.end_offs) as usize..rc.storage as usize],
+                &self.rc.buf[(self.rc.storage - self.rc.end_offs) as usize..self.rc.storage as usize],
             );
 
             while combined.len() > 2 && combined[combined.len() - 1] == 0 {
@@ -597,7 +646,7 @@ impl OpusEncoder {
             // where the decoder can read forward from buf[0] and backward from buf[n_bytes-2].
             // This ensures encoder total_bits == decoder total_bits (both use (n_bytes-1)*8).
             let payload_len = n_bytes - 1;
-            output[1..1 + payload_len].copy_from_slice(&rc.buf[..payload_len]);
+            output[1..1 + payload_len].copy_from_slice(&self.rc.buf[..payload_len]);
             Ok(n_bytes)
         }
     }
@@ -619,6 +668,9 @@ pub struct OpusDecoder {
     silk_resampler: silk::resampler::SilkResampler,
 
     prev_internal_rate: i32,
+
+    /// Diagnostic: when true, skip CELT contribution in hybrid mode (output SILK only).
+    pub hybrid_skip_celt: bool,
 
     // Pre-allocated decode working buffers (avoid per-frame heap allocation)
     w_pcm_i16: Vec<i16>,       // SILK internal PCM: max 16kHz×20ms×2ch = 640
@@ -654,6 +706,7 @@ impl OpusDecoder {
             stream_channels: channels,
             silk_resampler: silk::resampler::SilkResampler::default(),
             prev_internal_rate: 0,
+            hybrid_skip_celt: false,
             // 640 = 16kHz × 20ms × 2ch (SILK max internal frame)
             w_pcm_i16: vec![0i16; 640],
             // 5760 × 2 = 48kHz × 120ms × 2ch (max output frame)
@@ -878,7 +931,10 @@ impl OpusDecoder {
 
                 let celt_out_len = frame_size * self.channels;
                 debug_assert!(celt_out_len <= self.w_celt_out.len());
-                {
+                if self.hybrid_skip_celt {
+                    // Diagnostic: skip CELT decode entirely, output SILK only
+                    self.w_celt_out[..celt_out_len].fill(0.0);
+                } else {
                     let total_bits = (payload_data.len() * 8) as i32;
                     let (celt_dec, celt_out) = (&mut self.celt_dec, &mut self.w_celt_out);
                     celt_dec.decode_from_range_coder(

@@ -14,6 +14,7 @@ pub const LOG2_FRAC_TABLE: [u8; 24] = [
     0, 8, 13, 16, 19, 21, 23, 24, 26, 27, 28, 29, 30, 31, 32, 32, 33, 34, 34, 35, 36, 36, 37, 37,
 ];
 
+#[inline(always)]
 pub fn get_pulses(i: i32) -> i32 {
     if i < 8 {
         i
@@ -26,37 +27,43 @@ pub fn get_pulses(i: i32) -> i32 {
     }
 }
 
+/// Binary search for pulse count from bit budget.
+/// Uses unsafe get_unchecked to eliminate bounds checks in the hot loop.
 #[inline(always)]
 pub fn bits2pulses(m: &CeltMode, band: usize, mut lm: i32, bits: i32) -> i32 {
     lm += 1;
-    let cache_index = m.cache.index[lm as usize * m.nb_ebands + band];
+    let idx = lm as usize * m.nb_ebands + band;
+    let cache_index = unsafe { *m.cache.index.get_unchecked(idx) };
     if cache_index < 0 {
         return 0;
     }
     let cache = &m.cache.bits[cache_index as usize..];
+    let cache_ptr = cache.as_ptr();
 
-    let mut lo = 0;
-    let hi_limit = cache[0];
-    let mut hi = hi_limit as usize;
+    let mut lo = 0usize;
+    let mut hi = unsafe { *cache_ptr } as usize;
     let bits_minus_one = bits - 1;
 
-    // Binary search with early termination when bounds converge.
-    // Most searches converge within 4-5 iterations due to small cache sizes.
-    while lo + 1 < hi {
-        let mid = (lo + hi) >> 1;
-        if (cache[mid] as i32) >= bits_minus_one {
-            hi = mid;
-        } else {
-            lo = mid;
+    // Binary search: 4-5 iterations typically. Use get_unchecked to avoid
+    // bounds checks since lo < hi <= cache[0] is an invariant.
+    unsafe {
+        while lo + 1 < hi {
+            let mid = (lo + hi) >> 1;
+            if *cache_ptr.add(mid) as i32 >= bits_minus_one {
+                // mid is valid: mid < hi <= cache[0]
+                hi = mid;
+            } else {
+                lo = mid;
+            }
         }
-    }
 
-    if bits_minus_one - (if lo == 0 { -1 } else { cache[lo] as i32 })
-        <= (cache[hi] as i32) - bits_minus_one
-    {
-        lo as i32
-    } else {
-        hi as i32
+        let lo_val = if lo == 0 { -1i32 } else { *cache_ptr.add(lo) as i32 };
+        let hi_val = *cache_ptr.add(hi) as i32;
+        if bits_minus_one - lo_val <= hi_val - bits_minus_one {
+            lo as i32
+        } else {
+            hi as i32
+        }
     }
 }
 
@@ -66,12 +73,14 @@ pub fn pulses2bits(m: &CeltMode, band: usize, mut lm: i32, pulses: i32) -> i32 {
         return 0;
     }
     lm += 1;
-    let cache_index = m.cache.index[lm as usize * m.nb_ebands + band];
+    let idx = lm as usize * m.nb_ebands + band;
+    let cache_index = unsafe { *m.cache.index.get_unchecked(idx) };
     if cache_index < 0 {
         return 0;
     }
     let cache = &m.cache.bits[cache_index as usize..];
-    (cache[pulses as usize] as i32) + 1
+    // Safety: pulses is always a value returned by bits2pulses which is <= cache[0]
+    unsafe { (*cache.as_ptr().add(pulses as usize) as i32) + 1 }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -486,6 +495,12 @@ fn interp_bits2pulses(
             balance -= extra_bits;
         }
         pulses[j] = bits[j];
+    }
+    if std::env::var("RATE_DBG").is_ok() {
+        eprintln!("[RATE] percoeff={} left_after_percoeff={} pulses[0..8]=[{}, {}, {}, {}, {}, {}, {}, {}]",
+            percoeff, left, pulses[0], pulses[1], pulses[2], pulses[3], pulses[4], pulses[5], pulses[6], pulses[7]);
+        eprintln!("[RATE] ebits[0..8]=[{}, {}, {}, {}, {}, {}, {}, {}]",
+            ebits[0], ebits[1], ebits[2], ebits[3], ebits[4], ebits[5], ebits[6], ebits[7]);
     }
     *balance_out = balance;
 

@@ -10,11 +10,14 @@ fn test_celt_silence() {
 
     // Create a proper silence packet
     // In CELT, silence is indicated by the first bit being 1 with logp=15
-    let mut rc_enc = RangeCoder::new_encoder(100);
+    let buf_size = 100u32;
+    let mut rc_enc = RangeCoder::new_encoder(buf_size);
     // Encode silence bit
     rc_enc.encode_bit_logp(true, 15);
     rc_enc.done();
-    let silence_packet = rc_enc.finish();
+
+    // Use the full buffer to preserve the dual-stream layout
+    let silence_packet = rc_enc.buf[..buf_size as usize].to_vec();
 
     println!(
         "Silence packet: {:?}, len={}",

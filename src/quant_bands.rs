@@ -81,6 +81,7 @@ pub fn quant_coarse_energy(
     channels: usize,
     lm: usize,
     intra: bool,
+    nb_available_bytes: usize,
 ) {
     let prob_model = &E_PROB_MODEL[lm][if intra { 1 } else { 0 }];
     let coef = if intra { 0.0 } else { PRED_COEF[lm] };
@@ -88,13 +89,12 @@ pub fn quant_coarse_energy(
     debug_assert!(channels <= 2);
     let mut prev = [0.0f32; 2];
 
-    let mut max_decay = 16.0f32;
-    if lm == 0 {
-        max_decay = 8.0;
-    }
-    if lm >= 2 {
-        max_decay = 32.0;
-    }
+    // Match C: max_decay = min(16, 0.125 * nbAvailableBytes) when end-start > 10
+    let max_decay = if end - start > 10 {
+        16.0f32.min(0.125 * nb_available_bytes as f32)
+    } else {
+        16.0f32
+    };
 
     enc.encode_bit_logp(intra, 3);
 
@@ -353,6 +353,7 @@ mod tests {
             1,
             3,
             false,
+            80,
         );
 
         let mut fine_quant = vec![0; mode.nb_ebands];

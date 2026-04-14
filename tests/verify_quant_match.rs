@@ -39,6 +39,7 @@ fn test_quant_energy_match() {
         channels,
         lm,
         intra,
+        (budget / 8) as usize,
     );
 
     // 2. Fine Energy

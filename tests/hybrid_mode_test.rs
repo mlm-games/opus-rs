@@ -16,7 +16,9 @@ fn test_hybrid_mode_encode_basic() {
     encoder
         .enable_hybrid_mode()
         .expect("Failed to enable Hybrid mode");
-    encoder.bitrate_bps = 32000;
+    // Use bitrate below the ~17.6kbps mode-switching threshold so the encoder
+    // actually uses Hybrid mode (not CeltOnly).
+    encoder.bitrate_bps = 16000;
 
     let mut input = vec![0.0f32; frame_size];
     for i in 0..frame_size {

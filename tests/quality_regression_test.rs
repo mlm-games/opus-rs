@@ -186,11 +186,12 @@ fn test_mode_audio_16k_is_silk_only() {
     );
 }
 
-/// Audio + 48 kHz → HybridFB  (was incorrectly CeltOnly before the fix)
+/// Audio + 48 kHz at 16 kbps → HybridFB (below the 17.6 kbps mode-switching threshold)
+/// At higher bitrates (>= 17.6 kbps), Audio mode correctly uses CeltOnly.
 #[test]
 fn test_mode_audio_48k_is_hybrid_fb_not_celt_only() {
     let mut enc = OpusEncoder::new(48000, 1, Application::Audio).unwrap();
-    enc.bitrate_bps = 32000;
+    enc.bitrate_bps = 16000; // Below 17.6 kbps threshold → HybridFB
     enc.use_cbr = true;
 
     let input = make_sine(48000, 440.0, 960);
@@ -200,7 +201,7 @@ fn test_mode_audio_48k_is_hybrid_fb_not_celt_only() {
     assert_eq!(
         toc_mode_name(buf[0]),
         "HybridFB",
-        "Audio 48 kHz must use HybridFB (not CeltOnly), got config {}",
+        "Audio 48 kHz at 16kbps must use HybridFB (not CeltOnly), got config {}",
         toc_config(buf[0])
     );
 }
@@ -307,8 +308,7 @@ fn test_snr_audio_16k() {
     );
 }
 
-/// audio 48 kHz (HybridFB, 32 kbps) — baseline 21.31 dB → floor 19 dB
-/// (was 6.57 dB before the CeltOnly→Hybrid fix)
+/// audio 48 kHz (CeltOnly at 32 kbps; HybridFB below 17.6 kbps) — floor 19 dB
 #[test]
 fn test_snr_audio_48k() {
     let sample_rate = 48000i32;

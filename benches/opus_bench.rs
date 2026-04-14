@@ -12,7 +12,8 @@ fn configure_criterion() -> Criterion {
 use opus_rs::celt_lpc::autocorr;
 use opus_rs::kiss_fft::{KissCpx, KissFftState, opus_fft_impl};
 use opus_rs::modes::default_mode;
-use opus_rs::pvq::{alg_quant, encode_pulses, pvq_search};
+use opus_rs::pvq::{alg_quant, alg_unquant, decode_pulses, encode_pulses, pvq_search};
+use opus_rs::rate::clt_compute_allocation;
 use opus_rs::range_coder::RangeCoder;
 use opus_rs::silk::define::*;
 use opus_rs::silk::lpc_analysis::silk_burg_modified_fix;
@@ -40,6 +41,58 @@ fn sine_f32(samples: usize, sample_rate: u32, freq: u32) -> Vec<f32> {
             let t = i as f64 / sample_rate as f64;
             f64::sin(2.0 * std::f64::consts::PI * freq as f64 * t) as f32 * 0.25
         })
+        .collect()
+}
+
+/// Read a WAV file and return f32 samples (mono)
+fn read_wav_f32(path: &str) -> Vec<f32> {
+    let bytes = std::fs::read(path).expect("Failed to read WAV file");
+    
+    // Simple WAV parser - assumes 16-bit PCM mono
+    let data_start = find_data_chunk(&bytes);
+    
+    bytes[data_start..]
+        .chunks_exact(2)
+        .map(|chunk| {
+            let sample = i16::from_le_bytes([chunk[0], chunk[1]]) as f32 / 32768.0;
+            sample
+        })
+        .collect()
+}
+
+fn find_data_chunk(bytes: &[u8]) -> usize {
+    // Look for "data" marker after RIFF header
+    for i in 36..bytes.len().saturating_sub(8) {
+        if &bytes[i..i+4] == b"data" {
+            return i + 8; // Skip "data" + size
+        }
+    }
+    44 // Fallback: standard WAV header size
+}
+
+/// Get real audio frames for benchmarking
+fn get_real_audio_frames(sample_rate: u32, frame_ms: usize) -> Vec<Vec<f32>> {
+    let frame_size = sample_rate as usize * frame_ms / 1000;
+    
+    // Load 16kHz source
+    let source = read_wav_f32("fixtures/answer_16k.wav");
+    
+    // Resample if needed (simple approach)
+    let resampled: Vec<f32> = if sample_rate == 16000 {
+        source
+    } else if sample_rate == 48000 {
+        // 3x upsample
+        source.iter().flat_map(|&s| vec![s, s, s]).collect()
+    } else if sample_rate == 8000 {
+        // 2x downsample
+        source.iter().step_by(2).copied().collect()
+    } else {
+        source
+    };
+    
+    // Split into frames
+    resampled.chunks_exact(frame_size)
+        .map(|c| c.to_vec())
         .collect()
 }
 
@@ -526,7 +579,7 @@ fn bench_silk_pitch_analysis_core(c: &mut Criterion) {
 }
 
 fn bench_opus_vs_c(c: &mut Criterion) {
-    let mut group = c.benchmark_group("opus_vs_c");
+    let mut group = c.benchmark_group("opus_vs_c_real");
 
     for &(sample_rate, frame_ms, app_str) in &[
         (8000u32, 20usize, "voip"),
@@ -536,14 +589,17 @@ fn bench_opus_vs_c(c: &mut Criterion) {
         (48000u32, 10usize, "audio"),
     ] {
         let frame_size = sample_rate as usize * frame_ms / 1000;
-        let input = sine_f32(frame_size, sample_rate, 440);
+        let frames = get_real_audio_frames(sample_rate, frame_ms);
+        let num_frames = frames.len();
+        
+        println!("Loaded {} frames of real audio for {}Hz/{}ms", num_frames, sample_rate, frame_ms);
 
-        group.throughput(Throughput::Bytes(frame_size as u64 * 2));
+        group.throughput(Throughput::Bytes((frame_size * num_frames * 2) as u64));
 
         group.bench_with_input(
             BenchmarkId::new(format!("rust/{sample_rate}Hz/{frame_ms}ms"), app_str),
-            &(sample_rate, frame_size),
-            |b, &(sr, fs)| {
+            &(sample_rate, frame_size, num_frames),
+            |b, &(sr, fs, nf)| {
                 let app = if sr == 48000 {
                     Application::Audio
                 } else {
@@ -552,23 +608,26 @@ fn bench_opus_vs_c(c: &mut Criterion) {
                 let mut enc = OpusEncoder::new(sr as i32, 1, app).unwrap();
                 enc.bitrate_bps = if sr == 48000 { 64_000 } else { 20_000 };
                 enc.complexity = 0;
+                enc.use_cbr = true;
                 let mut dec = OpusDecoder::new(sr as i32, 1).unwrap();
                 let mut output = vec![0u8; 1024];
                 let mut pcm = vec![0.0f32; fs];
                 b.iter(|| {
-                    let len = enc
-                        .encode(black_box(&input), fs, black_box(&mut output))
-                        .unwrap();
-                    dec.decode(black_box(&output[..len]), fs, black_box(&mut pcm))
-                        .unwrap();
+                    for frame in &frames[..nf] {
+                        let len = enc
+                            .encode(black_box(&frame), fs, black_box(&mut output))
+                            .unwrap();
+                        dec.decode(black_box(&output[..len]), fs, black_box(&mut pcm))
+                            .unwrap();
+                    }
                 });
             },
         );
 
         group.bench_with_input(
             BenchmarkId::new(format!("c/{sample_rate}Hz/{frame_ms}ms"), app_str),
-            &(sample_rate, frame_size),
-            |b, &(sr, fs)| {
+            &(sample_rate, frame_size, num_frames),
+            |b, &(sr, fs, nf)| {
                 use opusic_sys::*;
                 let mut err = 0i32;
                 let app = if sr == 48000 {
@@ -584,26 +643,33 @@ fn bench_opus_vs_c(c: &mut Criterion) {
                 unsafe {
                     opus_encoder_ctl(enc, OPUS_SET_BITRATE_REQUEST, bitrate);
                     opus_encoder_ctl(enc, OPUS_SET_COMPLEXITY_REQUEST, 0i32);
+                    opus_encoder_ctl(enc, OPUS_SET_VBR_REQUEST, 0i32);
                 }
                 let mut output = vec![0u8; 1024];
                 let mut pcm = vec![0.0f32; fs];
-                b.iter(|| unsafe {
-                    let len = opus_encode_float(
-                        enc,
-                        black_box(input.as_ptr()),
-                        fs as i32,
-                        output.as_mut_ptr(),
-                        output.len() as i32,
-                    );
-                    if len > 0 {
-                        opus_decode_float(
-                            dec,
-                            black_box(output.as_ptr()),
-                            len,
-                            pcm.as_mut_ptr(),
-                            fs as i32,
-                            0,
-                        );
+                b.iter(|| {
+                    for frame in &frames[..nf] {
+                        let len = unsafe {
+                            opus_encode_float(
+                                enc,
+                                black_box(frame.as_ptr()),
+                                fs as i32,
+                                output.as_mut_ptr(),
+                                output.len() as i32,
+                            )
+                        };
+                        if len > 0 {
+                            unsafe {
+                                opus_decode_float(
+                                    dec,
+                                    black_box(output.as_ptr()),
+                                    len,
+                                    pcm.as_mut_ptr(),
+                                    fs as i32,
+                                    0,
+                                );
+                            }
+                        }
                     }
                 });
                 unsafe {
@@ -667,6 +733,7 @@ fn bench_opus_audio_split_vs_c(c: &mut Criterion) {
                 let mut enc = OpusEncoder::new(sr as i32, 1, Application::Audio).unwrap();
                 enc.bitrate_bps = 64_000;
                 enc.complexity = 0;
+                enc.use_cbr = true;
                 let mut output = vec![0u8; 1024];
                 b.iter(|| {
                     enc.encode(black_box(&input), fs, black_box(&mut output))
@@ -688,6 +755,7 @@ fn bench_opus_audio_split_vs_c(c: &mut Criterion) {
                 unsafe {
                     opus_encoder_ctl(enc, OPUS_SET_BITRATE_REQUEST, 64_000i32);
                     opus_encoder_ctl(enc, OPUS_SET_COMPLEXITY_REQUEST, 0i32);
+                    opus_encoder_ctl(enc, OPUS_SET_VBR_REQUEST, 0i32); // CBR for fair comparison
                 }
 
                 let mut output = vec![0u8; 1024];
@@ -937,6 +1005,24 @@ fn bench_pvq(c: &mut Criterion) {
                 });
             },
         );
+
+        // Decode pulses benchmark
+        group.bench_with_input(
+            BenchmarkId::new(format!("decode_pulses/n{n}/k{k}"), ""),
+            &(n, k),
+            |b, &(ns, ks)| {
+                // First encode to get valid data
+                let mut rc = RangeCoder::new_encoder(1024);
+                encode_pulses(&y, ns as u32, ks as u32, &mut rc);
+                let data = rc.finish();
+                
+                b.iter(|| {
+                    let mut rc_dec = RangeCoder::new_decoder(&data);
+                    let mut y_dec = vec![0i32; ns];
+                    decode_pulses(black_box(&mut y_dec), ns as u32, ks as u32, &mut rc_dec);
+                });
+            },
+        );
     }
 
     // alg_quant (combined pvq_search + encode_pulses + exp_rotation)
@@ -967,7 +1053,159 @@ fn bench_pvq(c: &mut Criterion) {
             },
         );
     }
+    
+    // alg_unquant (decode path)
+    for &(n, k) in &[(16usize, 8i32), (64, 16)] {
+        // First encode to get valid bitstream
+        let mut x_enc: Vec<f32> = (0..n).map(|i| (i as f32 * 0.5).sin()).collect();
+        let mut rc_enc = RangeCoder::new_encoder(1024);
+        alg_quant(&mut x_enc, n, k, 2, 1, &mut rc_enc, 1.0, true);
+        let data = rc_enc.finish();
+        
+        let mut x: Vec<f32> = vec![0.0; n];
+        group.bench_with_input(
+            BenchmarkId::new(format!("alg_unquant/n{n}/k{k}"), ""),
+            &(n, k),
+            |b, &(ns, ks)| {
+                b.iter(|| {
+                    let mut rc = RangeCoder::new_decoder(&data);
+                    // Reset x
+                    x.fill(0.0);
+                    alg_unquant(
+                        black_box(&mut x),
+                        ns,
+                        ks,
+                        2, // SPREAD_NORMAL
+                        1,
+                        &mut rc,
+                        1.0,
+                    );
+                });
+            },
+        );
+    }
 
+    group.finish();
+}
+
+fn bench_celt_internal(c: &mut Criterion) {
+    let mut group = c.benchmark_group("celt_internal");
+    
+    // Benchmark range coder operations
+    group.bench_function("range_coder/enc_uint_small", |b| {
+        let mut rc = RangeCoder::new_encoder(1024);
+        b.iter(|| {
+            rc = RangeCoder::new_encoder(1024);
+            for i in 0..100 {
+                rc.enc_uint(black_box((i % 16) as u32), 16);
+            }
+        });
+    });
+    
+    group.bench_function("range_coder/enc_bits", |b| {
+        let mut rc = RangeCoder::new_encoder(1024);
+        b.iter(|| {
+            rc = RangeCoder::new_encoder(1024);
+            for i in 0..100 {
+                rc.enc_bits(black_box((i % 2) as u32), 1);
+            }
+        });
+    });
+    
+    group.bench_function("range_coder/dec_uint_small", |b| {
+        let mut rc = RangeCoder::new_encoder(1024);
+        for i in 0..100 {
+            rc.enc_uint((i % 16) as u32, 16);
+        }
+        let data = rc.finish();
+        
+        b.iter(|| {
+            let mut rc_dec = RangeCoder::new_decoder(&data);
+            for _ in 0..100 {
+                let _ = black_box(rc_dec.dec_uint(16));
+            }
+        });
+    });
+    
+    // Benchmark encode_bit_logp (common in CELT)
+    group.bench_function("range_coder/encode_bit_logp", |b| {
+        let mut rc = RangeCoder::new_encoder(1024);
+        b.iter(|| {
+            rc = RangeCoder::new_encoder(1024);
+            for i in 0..100 {
+                rc.encode_bit_logp(black_box((i % 2) == 0), 1);
+            }
+        });
+    });
+    
+    // Benchmark tell_frac
+    group.bench_function("range_coder/tell_frac", |b| {
+        let mut rc = RangeCoder::new_encoder(1024);
+        for i in 0..50 {
+            rc.enc_uint((i % 16) as u32, 16);
+        }
+        
+        b.iter(|| {
+            for _ in 0..100 {
+                let _ = black_box(rc.tell_frac());
+            }
+        });
+    });
+    
+    group.finish();
+}
+
+fn bench_rate(c: &mut Criterion) {
+    let mut group = c.benchmark_group("rate");
+    
+    // Benchmark clt_compute_allocation
+    group.bench_function("clt_compute_allocation", |b| {
+        let mode = default_mode();
+        let nb_ebands = mode.nb_ebands;
+        let mut offsets = vec![0i32; nb_ebands];
+        let cap = vec![64i32; nb_ebands];
+        let mut pulses = vec![0i32; nb_ebands];
+        let mut ebits = vec![0i32; nb_ebands];
+        let mut fine_priority = vec![0i32; nb_ebands];
+        let mut balance = 0i32;
+        let mut intensity = 0i32;
+        let mut dual_stereo = 0i32;
+        let mut rc = RangeCoder::new_encoder(1024);
+        
+        b.iter(|| {
+            offsets.fill(0);
+            pulses.fill(0);
+            ebits.fill(0);
+            fine_priority.fill(0);
+            balance = 0;
+            intensity = 0;
+            dual_stereo = 0;
+            rc = RangeCoder::new_encoder(1024);
+            
+            let _ = clt_compute_allocation(
+                black_box(mode),
+                0, // start
+                nb_ebands,
+                &offsets,
+                &cap,
+                5, // alloc_trim
+                &mut intensity,
+                &mut dual_stereo,
+                64000, // total bits
+                &mut balance,
+                &mut pulses,
+                &mut ebits,
+                &mut fine_priority,
+                1, // c (channels)
+                3, // lm
+                &mut rc,
+                true, // encode
+                0, // prev
+                (nb_ebands - 1) as i32, // signal_bandwidth
+            );
+        });
+    });
+    
     group.finish();
 }
 
@@ -990,5 +1228,7 @@ criterion_group! {
         bench_fft,
         bench_mdct,
         bench_pvq,
+        bench_celt_internal,
+        bench_rate,
 }
 criterion_main!(benches);

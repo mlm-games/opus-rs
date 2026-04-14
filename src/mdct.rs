@@ -1,5 +1,6 @@
 use crate::kiss_fft::{KissCpx, KissFftState, opus_fft_impl};
 use std::f32::consts::PI;
+use std::mem::MaybeUninit;
 
 const MAX_N2: usize = 960;
 const MAX_N4: usize = 480;
@@ -81,10 +82,13 @@ impl MdctLookup {
         let (trig, _) = self.get_trig(shift);
         let overlap2 = overlap / 2;
 
-        let mut f_buf = [0.0f32; MAX_N2];
-        let mut f2_buf = [KissCpx::new(0.0, 0.0); MAX_N4];
-        let f = &mut f_buf[..n2];
-        let f2 = &mut f2_buf[..n4];
+        let mut f_buf = [MaybeUninit::<f32>::uninit(); MAX_N2];
+        let mut f2_buf = [MaybeUninit::<KissCpx>::uninit(); MAX_N4];
+        // SAFETY: f_buf[0..n2] is fully written by the three fold loops below
+        // (loop1 + loop2 + loop3 write exactly 2*n4 = n2 elements).
+        // f2_buf[0..n4] is fully written by the pre-rotation loop.
+        let f = unsafe { std::slice::from_raw_parts_mut(f_buf.as_mut_ptr() as *mut f32, n2) };
+        let f2 = unsafe { std::slice::from_raw_parts_mut(f2_buf.as_mut_ptr() as *mut KissCpx, n4) };
 
         // Assert caller invariants so LLVM can prove all loop accesses in-bounds
         // and eliminate per-element conditional checks, enabling auto-vectorization.
@@ -159,6 +163,11 @@ impl MdctLookup {
         }
 
         // Pre-rotation with bitrev indexing
+        #[cfg(target_arch = "aarch64")]
+        {
+            mdct_pre_rotation_neon(f, f2, trig, &st.bitrev[..n4], n4, scale);
+        }
+        #[cfg(not(target_arch = "aarch64"))]
         for i in 0..n4 {
             let re = f[2 * i];
             let im = f[2 * i + 1];
@@ -174,6 +183,11 @@ impl MdctLookup {
         opus_fft_impl(st, f2);
 
         // Post-rotation
+        #[cfg(target_arch = "aarch64")]
+        {
+            mdct_post_rotation_neon(f2, trig, output, n4, n2, stride);
+        }
+        #[cfg(not(target_arch = "aarch64"))]
         for i in 0..n4 {
             let fp = &f2[i];
             let t0 = trig[i];
@@ -207,9 +221,15 @@ impl MdctLookup {
 
         let (trig, _) = self.get_trig(shift);
 
-        let mut f2_buf = [KissCpx::new(0.0, 0.0); MAX_N4];
-        let f2 = &mut f2_buf[..n4];
+        let mut f2_buf = [MaybeUninit::<KissCpx>::uninit(); MAX_N4];
+        // SAFETY: f2_buf[0..n4] is fully written by the pre-rotation loop below.
+        let f2 = unsafe { std::slice::from_raw_parts_mut(f2_buf.as_mut_ptr() as *mut KissCpx, n4) };
 
+        #[cfg(target_arch = "aarch64")]
+        {
+            mdct_backward_pre_rotation_neon(input, f2, trig, &st.bitrev[..n4], n4, n2, stride);
+        }
+        #[cfg(not(target_arch = "aarch64"))]
         for i in 0..n4 {
             let rev = st.bitrev[i] as usize;
             let x1 = input[2 * i * stride];
@@ -226,12 +246,14 @@ impl MdctLookup {
         opus_fft_impl(st, f2);
 
         // Post-rotate: write directly from f2 into output[overlap2..overlap2+n2].
-        // C's clt_mdct_backward writes pre-rotate output into out+(overlap>>1) and
-        // post-rotates in-place; we mirror that by skipping the temp buffer entirely.
-        // Reads f2[i] and f2[n4-1-i] in each iteration (no aliasing with output).
         assert!(output.len() >= overlap2 + n2);
+
+        #[cfg(target_arch = "aarch64")]
+        {
+            mdct_backward_post_rotation_neon(f2, trig, output, n4, n2, overlap2);
+        }
+        #[cfg(not(target_arch = "aarch64"))]
         for i in 0..((n4 + 1) >> 1) {
-            // C: re=yp0[1] (f2[i].i), im=yp0[0] (f2[i].r) — swapped for FFT-not-IFFT
             let im0 = f2[i].r;
             let re0 = f2[i].i;
             let t0_0 = trig[i];
@@ -244,7 +266,7 @@ impl MdctLookup {
             let im1 = f2[j].r;
             let re1 = f2[j].i;
             let t0_1 = trig[j];
-            let t1_1 = trig[n4 + j]; // = trig[n2 - i - 1]
+            let t1_1 = trig[n4 + j];
 
             let yr1 = re1 * t0_1 + im1 * t1_1;
             let yi1 = re1 * t1_1 - im1 * t0_1;
@@ -256,21 +278,427 @@ impl MdctLookup {
         }
 
         // Apply TDAC to overlap region
-        // C code: xp1 = out+overlap-1, yp1 = out
-        // x1 = *xp1 (reads from out[overlap-1] down to out[overlap/2])
-        // x2 = *yp1 (reads from out[0] up to out[overlap/2-1])
-        // The key insight: x2 comes from the START of the output buffer,
-        // which contains the previous frame's overlap data (preserved by caller)
+        #[cfg(target_arch = "aarch64")]
+        {
+            mdct_tdac_neon(output, window, overlap);
+        }
+        #[cfg(not(target_arch = "aarch64"))]
         for i in 0..overlap2 {
-            // x1: current frame's IMDCT output at the end of overlap region
             let x1 = output[overlap - 1 - i];
-            // x2: previous frame's overlap data at the start of buffer (or zeros for first frame)
             let x2 = output[i];
             let wp1 = window[i];
             let wp2 = window[overlap - 1 - i];
 
             output[i] = x2 * wp2 - x1 * wp1;
             output[overlap - 1 - i] = x2 * wp1 + x1 * wp2;
+        }
+    }
+}
+
+/// NEON-optimized MDCT pre-rotation: complex multiply with trig table + bitrev scatter
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+fn mdct_pre_rotation_neon(
+    f: &[f32],
+    f2: &mut [KissCpx],
+    trig: &[f32],
+    bitrev: &[i16],
+    n4: usize,
+    scale: f32,
+) {
+    use std::arch::aarch64::*;
+
+    unsafe {
+        let vscale = vdupq_n_f32(scale);
+        let f_ptr = f.as_ptr();
+        let trig_ptr = trig.as_ptr();
+        let bitrev_ptr = bitrev.as_ptr();
+        let f2_ptr = f2.as_mut_ptr() as *mut f32;
+
+        // Process 4 complex pairs at a time
+        let n4_vec = n4 & !3;
+        let mut i = 0;
+
+        while i < n4_vec {
+            // Gather trig values: t0 = trig[i..i+4], t1 = trig[n4+i..n4+i+4]
+            let t0 = vld1q_f32(trig_ptr.add(i));
+            let t1 = vld1q_f32(trig_ptr.add(n4 + i));
+
+            // Load re/im as interleaved from f[2*i], f[2*i+1]
+            // f layout: [re0, im0, re1, im1, re2, im2, re3, im3, ...]
+            let f0 = vld1q_f32(f_ptr.add(2 * i));      // re0, im0, re1, im1
+            let f1 = vld1q_f32(f_ptr.add(2 * i + 4));   // re2, im2, re3, im3
+
+            // Deinterleave re and im using vuzpq (unzip even/odd)
+            let even_odd = vuzpq_f32(f0, f1);
+            let re_v = even_odd.0; // [re0, re1, re2, re3]
+            let im_v = even_odd.1; // [im0, im1, im2, im3]
+
+            // Complex multiply: yr = re*t0 - im*t1, yi = im*t0 + re*t1
+            let yr = vsubq_f32(vmulq_f32(re_v, t0), vmulq_f32(im_v, t1));
+            let yi = vaddq_f32(vmulq_f32(im_v, t0), vmulq_f32(re_v, t1));
+
+            // Apply scale
+            let yr = vmulq_f32(yr, vscale);
+            let yi = vmulq_f32(yi, vscale);
+
+            // Scatter to bitrev positions (unavoidable scalar)
+            let yr_arr: [f32; 4] = std::mem::transmute(yr);
+            let yi_arr: [f32; 4] = std::mem::transmute(yi);
+
+            for j in 0..4 {
+                let rev = *bitrev_ptr.add(i + j) as usize;
+                *f2_ptr.add(2 * rev) = yr_arr[j];
+                *f2_ptr.add(2 * rev + 1) = yi_arr[j];
+            }
+
+            i += 4;
+        }
+
+        // Scalar tail
+        for i in n4_vec..n4 {
+            let re = *f_ptr.add(2 * i);
+            let im = *f_ptr.add(2 * i + 1);
+            let t0 = *trig_ptr.add(i);
+            let t1 = *trig_ptr.add(n4 + i);
+            let yr = re * t0 - im * t1;
+            let yi = im * t0 + re * t1;
+            let rev = *bitrev_ptr.add(i) as usize;
+            *f2_ptr.add(2 * rev) = yr * scale;
+            *f2_ptr.add(2 * rev + 1) = yi * scale;
+        }
+    }
+}
+
+/// NEON-optimized MDCT post-rotation: complex multiply with trig table + stride scatter
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+fn mdct_post_rotation_neon(
+    f2: &[KissCpx],
+    trig: &[f32],
+    output: &mut [f32],
+    n4: usize,
+    n2: usize,
+    stride: usize,
+) {
+    use std::arch::aarch64::*;
+
+    // When stride > 1, NEON isn't beneficial due to scattered writes
+    if stride > 1 {
+        for i in 0..n4 {
+            let fp = &f2[i];
+            let t0 = trig[i];
+            let t1 = trig[n4 + i];
+            let yr = fp.i * t1 - fp.r * t0;
+            let yi = fp.r * t1 + fp.i * t0;
+            output[i * 2 * stride] = yr;
+            output[stride * (n2 - 1 - 2 * i)] = yi;
+        }
+        return;
+    }
+
+    unsafe {
+        let f2_ptr = f2.as_ptr() as *const f32;
+        let trig_ptr = trig.as_ptr();
+        let out_ptr = output.as_mut_ptr();
+
+        // Process 4 complex pairs at a time (stride=1)
+        let n4_vec = n4 & !3;
+        let mut i = 0;
+
+        while i < n4_vec {
+            // Load 4 KissCpx values (interleaved r,i)
+            let c0 = vld1q_f32(f2_ptr.add(2 * i));      // r0, i0, r1, i1
+            let c1 = vld1q_f32(f2_ptr.add(2 * i + 4));   // r2, i2, r3, i3
+
+            // Load trig
+            let t0 = vld1q_f32(trig_ptr.add(i));
+            let t1 = vld1q_f32(trig_ptr.add(n4 + i));
+
+            // Deinterleave r and i
+            let ri = vuzpq_f32(c0, c1);
+            let r_v = ri.0; // [r0, r1, r2, r3]
+            let i_v = ri.1; // [i0, i1, i2, i3]
+
+            // yr = i * t1 - r * t0
+            let yr = vsubq_f32(vmulq_f32(i_v, t1), vmulq_f32(r_v, t0));
+            // yi = r * t1 + i * t0
+            let yi = vaddq_f32(vmulq_f32(r_v, t1), vmulq_f32(i_v, t0));
+
+            // Store yr to output[2*i, 2*i+2, 2*i+4, 2*i+6]
+            let yr_arr: [f32; 4] = std::mem::transmute(yr);
+            let yi_arr: [f32; 4] = std::mem::transmute(yi);
+
+            // output[i*2] = yr, output[n2-1-2*i] = yi (strided by 2)
+            for j in 0..4 {
+                *out_ptr.add((i + j) * 2) = yr_arr[j];
+                *out_ptr.add(n2 - 1 - 2 * (i + j)) = yi_arr[j];
+            }
+
+            i += 4;
+        }
+
+        // Scalar tail
+        for i in n4_vec..n4 {
+            let fp = &f2[i];
+            let t0 = trig[i];
+            let t1 = trig[n4 + i];
+            let yr = fp.i * t1 - fp.r * t0;
+            let yi = fp.r * t1 + fp.i * t0;
+            output[i * 2] = yr;
+            output[n2 - 1 - 2 * i] = yi;
+        }
+    }
+}
+
+/// NEON-optimized MDCT backward pre-rotation: complex multiply with trig table + bitrev scatter
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+fn mdct_backward_pre_rotation_neon(
+    input: &[f32],
+    f2: &mut [KissCpx],
+    trig: &[f32],
+    bitrev: &[i16],
+    n4: usize,
+    n2: usize,
+    stride: usize,
+) {
+    use std::arch::aarch64::*;
+
+    // Fall back to scalar for non-unit stride (scattered input access)
+    if stride != 1 {
+        for i in 0..n4 {
+            let rev = bitrev[i] as usize;
+            let x1 = input[2 * i];
+            let x2 = input[n2 - 1 - 2 * i];
+            let t0 = trig[i];
+            let t1 = trig[n4 + i];
+            let yr = x2 * t0 + x1 * t1;
+            let yi = x1 * t0 - x2 * t1;
+            f2[rev] = KissCpx::new(yi, yr);
+        }
+        return;
+    }
+
+    unsafe {
+        let in_ptr = input.as_ptr();
+        let trig_ptr = trig.as_ptr();
+        let bitrev_ptr = bitrev.as_ptr();
+        let f2_ptr = f2.as_mut_ptr() as *mut f32;
+
+        let n4_vec = n4 & !3;
+        let mut i = 0;
+
+        while i < n4_vec {
+            // Load 4 x1 values from input[2*i], input[2*(i+1)], ... (stride 2)
+            let f0 = vld1q_f32(in_ptr.add(2 * i));
+            let f1 = vld1q_f32(in_ptr.add(2 * i + 4));
+            let deint_x1 = vuzpq_f32(f0, f1);
+            let x1_v = deint_x1.0; // [x1[i], x1[i+1], x1[i+2], x1[i+3]]
+
+            // Load 4 x2 values from input[n2-1-2*i], input[n2-3-2*i], ... (stride 2, backward)
+            // x2[i..i+3] are at indices: n2-1-2i, n2-3-2i, n2-5-2i, n2-7-2i
+            // Contiguous block: input[n2-7-2*i .. n2-1-2*i+1]
+            let g0 = vld1q_f32(in_ptr.add(n2 - 7 - 2 * i));
+            let g1 = vld1q_f32(in_ptr.add(n2 - 3 - 2 * i));
+            let deint_x2 = vuzpq_f32(g0, g1);
+            // deint_x2.0 = [in[n2-7-2i], in[n2-5-2i], in[n2-3-2i], in[n2-1-2i]]
+            //            = [x2[i+3], x2[i+2], x2[i+1], x2[i]]
+            let x2_raw = deint_x2.0;
+            let x2_v = vrev64q_f32(x2_raw);
+            let x2_v = vextq_f32(x2_v, x2_v, 2); // reverse → [x2[i], x2[i+1], x2[i+2], x2[i+3]]
+
+            // Load trig (contiguous)
+            let t0 = vld1q_f32(trig_ptr.add(i));
+            let t1 = vld1q_f32(trig_ptr.add(n4 + i));
+
+            // Complex multiply: yr = x2*t0 + x1*t1, yi = x1*t0 - x2*t1
+            let yr = vaddq_f32(vmulq_f32(x2_v, t0), vmulq_f32(x1_v, t1));
+            let yi = vsubq_f32(vmulq_f32(x1_v, t0), vmulq_f32(x2_v, t1));
+
+            // Scatter to bitrev positions (scalar stores)
+            let yr_arr: [f32; 4] = std::mem::transmute(yr);
+            let yi_arr: [f32; 4] = std::mem::transmute(yi);
+
+            for j in 0..4 {
+                let rev = *bitrev_ptr.add(i + j) as usize;
+                *f2_ptr.add(2 * rev) = yi_arr[j];     // f2[rev].r = yi
+                *f2_ptr.add(2 * rev + 1) = yr_arr[j]; // f2[rev].i = yr
+            }
+
+            i += 4;
+        }
+
+        // Scalar tail
+        for i in n4_vec..n4 {
+            let rev = *bitrev_ptr.add(i) as usize;
+            let x1 = *in_ptr.add(2 * i);
+            let x2 = *in_ptr.add(n2 - 1 - 2 * i);
+            let t0 = *trig_ptr.add(i);
+            let t1 = *trig_ptr.add(n4 + i);
+            let yr = x2 * t0 + x1 * t1;
+            let yi = x1 * t0 - x2 * t1;
+            *f2_ptr.add(2 * rev) = yi;
+            *f2_ptr.add(2 * rev + 1) = yr;
+        }
+    }
+}
+
+/// NEON-optimized backward MDCT post-rotation (pairs from both ends)
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+fn mdct_backward_post_rotation_neon(
+    f2: &[KissCpx],
+    trig: &[f32],
+    output: &mut [f32],
+    n4: usize,
+    n2: usize,
+    overlap2: usize,
+) {
+    unsafe {
+        let trig_ptr = trig.as_ptr();
+        let out_base = output.as_mut_ptr().add(overlap2);
+
+        // Process pairs from both ends: i and n4-1-i
+        // Each iteration produces 4 output values
+        let half = (n4 + 1) >> 1;
+
+        let mut i = 0;
+        while i + 1 < half {
+            let j0 = n4 - 1 - i;
+            let j1 = n4 - 1 - (i + 1);
+
+            // Load 4 f2 values (i, i+1 from low end; j1, j0 from high end)
+            // Process i and j0 as a pair
+            let re0 = f2[i].i;
+            let im0 = f2[i].r;
+            let t0_0 = *trig_ptr.add(i);
+            let t1_0 = *trig_ptr.add(n4 + i);
+            let yr0 = re0 * t0_0 + im0 * t1_0;
+            let yi0 = re0 * t1_0 - im0 * t0_0;
+
+            let im1 = f2[j0].r;
+            let re1 = f2[j0].i;
+            let t0_1 = *trig_ptr.add(j0);
+            let t1_1 = *trig_ptr.add(n4 + j0);
+            let yr1 = re1 * t0_1 + im1 * t1_1;
+            let yi1 = re1 * t1_1 - im1 * t0_1;
+
+            *out_base.add(2 * i) = yr0;
+            *out_base.add(n2 - 1 - 2 * i) = yi0;
+            *out_base.add(n2 - 2 - 2 * i) = yr1;
+            *out_base.add(2 * i + 1) = yi1;
+
+            // Process i+1 and j1
+            let re0b = f2[i + 1].i;
+            let im0b = f2[i + 1].r;
+            let t0_0b = *trig_ptr.add(i + 1);
+            let t1_0b = *trig_ptr.add(n4 + i + 1);
+            let yr0b = re0b * t0_0b + im0b * t1_0b;
+            let yi0b = re0b * t1_0b - im0b * t0_0b;
+
+            let im1b = f2[j1].r;
+            let re1b = f2[j1].i;
+            let t0_1b = *trig_ptr.add(j1);
+            let t1_1b = *trig_ptr.add(n4 + j1);
+            let yr1b = re1b * t0_1b + im1b * t1_1b;
+            let yi1b = re1b * t1_1b - im1b * t0_1b;
+
+            *out_base.add(2 * (i + 1)) = yr0b;
+            *out_base.add(n2 - 1 - 2 * (i + 1)) = yi0b;
+            *out_base.add(n2 - 2 - 2 * (i + 1)) = yr1b;
+            *out_base.add(2 * (i + 1) + 1) = yi1b;
+
+            i += 2;
+        }
+
+        // Handle odd center element
+        if i < half {
+            let j = n4 - 1 - i;
+            let im0 = f2[i].r;
+            let re0 = f2[i].i;
+            let t0_0 = *trig_ptr.add(i);
+            let t1_0 = *trig_ptr.add(n4 + i);
+            let yr0 = re0 * t0_0 + im0 * t1_0;
+            let yi0 = re0 * t1_0 - im0 * t0_0;
+
+            let im1 = f2[j].r;
+            let re1 = f2[j].i;
+            let t0_1 = *trig_ptr.add(j);
+            let t1_1 = *trig_ptr.add(n4 + j);
+            let yr1 = re1 * t0_1 + im1 * t1_1;
+            let yi1 = re1 * t1_1 - im1 * t0_1;
+
+            *out_base.add(2 * i) = yr0;
+            *out_base.add(n2 - 1 - 2 * i) = yi0;
+            *out_base.add(n2 - 2 - 2 * i) = yr1;
+            *out_base.add(2 * i + 1) = yi1;
+        }
+    }
+}
+
+/// NEON-optimized TDAC (time-domain aliasing cancellation)
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+fn mdct_tdac_neon(output: &mut [f32], window: &[f32], overlap: usize) {
+    use std::arch::aarch64::*;
+
+    let overlap2 = overlap / 2;
+    if overlap2 < 4 {
+        // Too small for NEON
+        for i in 0..overlap2 {
+            let x1 = output[overlap - 1 - i];
+            let x2 = output[i];
+            let wp1 = window[i];
+            let wp2 = window[overlap - 1 - i];
+            output[i] = x2 * wp2 - x1 * wp1;
+            output[overlap - 1 - i] = x2 * wp1 + x1 * wp2;
+        }
+        return;
+    }
+
+    unsafe {
+        let out_ptr = output.as_mut_ptr();
+        let win_ptr = window.as_ptr();
+        let n4 = overlap2 & !3;
+        let mut i = 0;
+
+        while i < n4 {
+            // Load output[i..i+4] (forward) and output[overlap-1-i..overlap-4-i] (reverse)
+            let x2_fwd = vld1q_f32(out_ptr.add(i));
+            let x1_rev = vld1q_f32(out_ptr.add(overlap - 4 - i)); // reversed order
+
+            // Reverse x1_rev to get [overlap-1-i, overlap-2-i, overlap-3-i, overlap-4-i]
+            let x1 = vrev64q_f32(x1_rev);
+            let x1 = vextq_f32(x1, x1, 2); // swap the two 64-bit halves
+
+            // Load window[i..i+4] and window[overlap-1-i..overlap-4-i]
+            let wp1_fwd = vld1q_f32(win_ptr.add(i));
+            let wp2_rev = vld1q_f32(win_ptr.add(overlap - 4 - i));
+            let wp2 = vrev64q_f32(wp2_rev);
+            let wp2 = vextq_f32(wp2, wp2, 2);
+            let wp1 = wp1_fwd;
+
+            // output[i] = x2 * wp2 - x1 * wp1
+            let out_fwd = vsubq_f32(vmulq_f32(x2_fwd, wp2), vmulq_f32(x1, wp1));
+            // output[overlap-1-i] = x2 * wp1 + x1 * wp2
+            let out_rev = vaddq_f32(vmulq_f32(x2_fwd, wp1), vmulq_f32(x1, wp2));
+
+            // Reverse out_rev for storage
+            let out_rev = vrev64q_f32(out_rev);
+            let out_rev = vextq_f32(out_rev, out_rev, 2);
+
+            vst1q_f32(out_ptr.add(i), out_fwd);
+            vst1q_f32(out_ptr.add(overlap - 4 - i), out_rev);
+
+            i += 4;
+        }
+
+        for i in n4..overlap2 {
+            let x1 = output[overlap - 1 - i];
+            let x2 = output[i];
+            output[i] = x2 * window[overlap - 1 - i] - x1 * window[i];
+            output[overlap - 1 - i] = x2 * window[i] + x1 * window[overlap - 1 - i];
         }
     }
 }

@@ -23,10 +23,19 @@ fn test_celt_loopback() {
         }
         all_in.extend_from_slice(&pcm_in);
 
-        let mut rc = RangeCoder::new_encoder(2048); // High bitrate
+        // Use a buffer large enough for high bitrate.
+        // IMPORTANT: The range coder uses a two-stream layout: forward stream
+        // from the start, backward stream (raw bits) from the end. We must
+        // preserve this [front | zeros | back] layout when passing data to the
+        // decoder. Using rc.finish() concatenates [front|back] and breaks the
+        // decoder's backward stream. Instead, pass the full rc.buf directly
+        // (matching how OpusEncoder handles CeltOnly mode).
+        let rc_size: u32 = 2048;
+        let mut rc = RangeCoder::new_encoder(rc_size);
         encoder.encode(&pcm_in, frame_size, &mut rc);
-        let mut compressed = rc.finish();
-        compressed.resize(2048, 0);
+
+        let mut compressed = vec![0u8; rc_size as usize];
+        compressed.copy_from_slice(&rc.buf[..rc_size as usize]);
 
         let mut pcm_out = vec![0.0f32; frame_size * channels];
         let decoded_len = decoder.decode(&compressed, frame_size, &mut pcm_out);
@@ -117,9 +126,8 @@ fn test_celt_loopback() {
     }
 
     // C reference also gets ~4-5 dB SNR under these test conditions
-    // Current implementation achieves ~2-3 dB, needs improvement
-    // TODO: Improve CELT quality to match C reference (>4 dB)
-    assert!(best_snr > 0.0, "SNR too low: {:.2} dB", best_snr);
+    // We should achieve at least 5 dB after the buffer layout fix
+    assert!(best_snr > 5.0, "SNR too low: {:.2} dB", best_snr);
 }
 
 fn calculate_snr(all_in: &[f32], all_out: &[f32], delay: usize, start: usize, end: usize) -> f32 {
