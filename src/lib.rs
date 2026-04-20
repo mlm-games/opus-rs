@@ -592,26 +592,15 @@ impl OpusEncoder {
             }
         }
 
-        // In Hybrid mode, the C encoder always writes a redundancy flag after SILK encoding.
-        // The C decoder reads this flag. Without it, the decoder's range coder state diverges,
-        // corrupting CELT decoding. We always write redundancy=0 (no redundancy frame).
-        // C: if (st->mode == MODE_HYBRID) ec_enc_bit_logp(&enc, redundancy, 12);
         if mode == OpusMode::Hybrid {
-            if self.rc.tell() + 37 <= ((n_bytes - 1) * 8) as i32 {
-                self.rc.encode_bit_logp(false, 12); // redundancy = 0
-            }
+            self.rc.encode_bit_logp(false, 12); // redundancy = 0
         }
 
-        // For hybrid mode, shrink the range coder buffer to the CELT target size
-        // after SILK encoding, like C's ec_enc_shrink(&enc, nb_compr_bytes).
-        // With init_rc_size == n_bytes-1, shrink is a no-op but keeps the logic consistent.
         if mode == OpusMode::Hybrid {
             let nb_compr_bytes = (n_bytes - 1) as u32;
             self.rc.shrink(nb_compr_bytes);
         }
 
-        // For SILK-only, capture byte count BEFORE done(), matching C's:
-        //   ret = (ec_tell(&enc)+7)>>3; ec_enc_done(&enc); nb_compr_bytes = ret;
         let silk_ret_bytes = if mode == OpusMode::SilkOnly {
             ((self.rc.tell() + 7) >> 3) as usize
         } else {
@@ -622,7 +611,7 @@ impl OpusEncoder {
             self.celt_enc.complexity = self.complexity;
             let start_band = if mode == OpusMode::Hybrid { 17 } else { 0 };
             let total_packet_bits = ((n_bytes - 1) * 8) as i32;
-            // Only encode CELT if we haven't already busted the budget
+
             if self.rc.tell() <= total_packet_bits {
                 self.celt_enc.encode_with_budget(
                     input,
@@ -637,8 +626,6 @@ impl OpusEncoder {
         self.rc.done();
 
         if mode == OpusMode::SilkOnly {
-            // Use the byte count captured before done(), strip trailing zeros
-            // from the contiguous buffer (like C does).
             let mut ret = silk_ret_bytes.min(self.rc.storage as usize);
             while ret > 2 && self.rc.buf[ret - 1] == 0 {
                 ret -= 1;
@@ -660,7 +647,6 @@ impl OpusEncoder {
                 return Ok((copy_len + 1).min(output.len()));
             }
 
-            // CBR: pad with code 3 framing
             output[0] = toc | 0x03;
 
             if silk_len + 2 >= target_total {
@@ -989,12 +975,22 @@ impl OpusDecoder {
                     }
                 }
 
+                // In Hybrid mode the encoder always writes a redundancy flag (logp=12)
+                // immediately after SILK.  Read it here to keep the range-coder in sync.
+                // We don't support redundancy frames, so if the flag is somehow 1 we
+                // still just consume the extra bit and fall through to normal CELT decode.
+                let total_bits = (payload_data.len() * 8) as i32;
+                let redundancy = rc.decode_bit_logp(12);
+                if redundancy {
+                    // Consume celt_to_silk flag; actual redundancy frame handling not implemented.
+                    let _ = rc.decode_bit_logp(1);
+                }
+
                 let celt_out_len = frame_size * self.channels;
                 debug_assert!(celt_out_len <= self.w_celt_out.len());
                 if self.hybrid_skip_celt {
                     self.w_celt_out[..celt_out_len].fill(0.0);
                 } else {
-                    let total_bits = (payload_data.len() * 8) as i32;
                     let (celt_dec, celt_out) = (&mut self.celt_dec, &mut self.w_celt_out);
                     celt_dec.decode_from_range_coder(
                         &mut rc,

@@ -5,6 +5,7 @@ fn test_48k_hybrid_quality() {
     let sample_rate = 48000;
     let frame_size = 960; // 20ms at 48kHz
     let num_frames = 10;
+    let total_samples = frame_size * num_frames;
 
     // Create encoder/decoder in VoIP mode (uses Hybrid for 48kHz)
     let mut encoder = OpusEncoder::new(sample_rate as i32, 1, Application::Voip).unwrap();
@@ -13,50 +14,68 @@ fn test_48k_hybrid_quality() {
 
     let mut decoder = OpusDecoder::new(sample_rate as i32, 1).unwrap();
 
-    // Generate and process multiple frames
-    let mut total_input_energy = 0.0f64;
-    let mut total_error_energy = 0.0f64;
+    // Generate all input samples and collect all output samples
+    let input: Vec<f32> = (0..total_samples)
+        .map(|i| {
+            let t = i as f64 / sample_rate as f64;
+            (f64::sin(2.0 * std::f64::consts::PI * 1000.0 * t) * 0.5) as f32
+        })
+        .collect();
 
+    let mut output = vec![0.0f32; total_samples];
     for frame in 0..num_frames {
-        // Generate input signal (sine wave)
-        let mut input: Vec<f32> = Vec::with_capacity(frame_size);
-        for i in 0..frame_size {
-            let t = (frame * frame_size + i) as f64 / sample_rate as f64;
-            let sample = f64::sin(2.0 * std::f64::consts::PI * 1000.0 * t) as f32 * 0.5;
-            input.push(sample);
-        }
-
-        // Encode
+        let s = frame * frame_size;
+        let e = s + frame_size;
         let mut encoded = vec![0u8; 512];
-        let len = encoder.encode(&input, frame_size, &mut encoded).unwrap();
+        let len = encoder
+            .encode(&input[s..e], frame_size, &mut encoded)
+            .unwrap();
         encoded.truncate(len);
-
-        // Decode
-        let mut output = vec![0.0f32; frame_size];
-        decoder.decode(&encoded, frame_size, &mut output).unwrap();
-
-        // Calculate energy
-        for i in 0..frame_size {
-            total_input_energy += (input[i] as f64).powi(2);
-            total_error_energy += ((input[i] - output[i]) as f64).powi(2);
-        }
+        decoder
+            .decode(&encoded, frame_size, &mut output[s..e])
+            .unwrap();
     }
 
-    let snr = 10.0 * (total_input_energy / total_error_energy).log10();
-    println!("48kHz Hybrid mode SNR: {:.2} dB", snr);
-    println!("Input energy: {:.2e}", total_input_energy);
-    println!("Error energy: {:.2e}", total_error_energy);
+    // The codec introduces a fixed latency (SILK resampling + algorithmic delay).
+    // Measure SNR after compensating for this delay via cross-correlation.
+    // Without compensation, a perfectly-working codec still shows ~-3 dB SNR for a
+    // 1 kHz sine when the delay is ~quarter-period.
+    let skip = frame_size * 2; // skip first two frames (codec warm-up)
+    let max_search = frame_size / 2;
+    let best_delay = (0..max_search)
+        .map(|d| {
+            let corr: f64 = input[skip..total_samples - d]
+                .iter()
+                .zip(output[skip + d..].iter())
+                .map(|(a, b)| *a as f64 * *b as f64)
+                .sum();
+            (d, corr)
+        })
+        .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
+        .map(|(d, _)| d)
+        .unwrap_or(0);
 
-    // SNR should be at least 10 dB for acceptable quality
-    // Currently it's around -0.65 dB, which is very poor
-    if snr < 10.0 {
-        println!("WARNING: SNR is below 10 dB. Hybrid mode quality needs improvement.");
-        println!("Known issues:");
-        println!("  1. CELT decoder output amplitude is ~35-40% of expected");
-        println!("  2. Energy quantization may have scaling issues");
-        println!("  3. MDCT reconstruction shows decay within frames");
-    }
+    let n = total_samples - skip - best_delay;
+    let input_energy: f64 = input[skip..skip + n]
+        .iter()
+        .map(|x| (*x as f64).powi(2))
+        .sum();
+    let error_energy: f64 = input[skip..skip + n]
+        .iter()
+        .zip(output[skip + best_delay..skip + best_delay + n].iter())
+        .map(|(a, b)| ((*a - *b) as f64).powi(2))
+        .sum();
 
-    // For now, just report the SNR without failing
-    // assert!(snr > 10.0, "SNR too low: {:.2} dB", snr);
+    let snr = 10.0 * (input_energy / error_energy).log10();
+    println!(
+        "48kHz Hybrid mode SNR (delay-corrected, delay={} samples): {:.2} dB",
+        best_delay, snr
+    );
+
+    assert!(
+        snr > 10.0,
+        "Hybrid mode SNR {:.2} dB is too low (expected >10 dB). \
+         SILK+CELT decode is producing distorted output.",
+        snr
+    );
 }

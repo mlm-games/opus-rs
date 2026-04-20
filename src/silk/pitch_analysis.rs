@@ -315,6 +315,7 @@ pub fn silk_pitch_analysis_core(
     }
 
     let mut c_8khz = [0i16; PE_MAX_NB_SUBFR * CSTRIDE_8KHZ];
+    let mut xcorr_comp = [0i32; D_COMP_STRIDE];
     let mut target_ptr_8khz_idx = PE_LTP_MEM_LENGTH_MS * 8;
     for k in 0..nb_subfr {
         let energy_target = silk_inner_prod_aligned(
@@ -323,25 +324,52 @@ pub fn silk_pitch_analysis_core(
             SF_LENGTH_8KHZ,
         )
         .wrapping_add(1);
-        for j in 0..length_d_comp {
-            let d = d_comp_indices[j];
-            let basis_ptr_idx = target_ptr_8khz_idx as i32 - d;
-            let cross_corr = silk_inner_prod_aligned(
+
+        if length_d_comp > 0 {
+            let min_d = d_comp_indices[0] as usize;
+            let max_d = d_comp_indices[length_d_comp - 1] as usize;
+            let lag_span = max_d - min_d + 1;
+
+            silk_pitch_xcorr(
                 &frame_8khz[target_ptr_8khz_idx..],
-                &frame_8khz[basis_ptr_idx as usize..],
+                &frame_8khz[target_ptr_8khz_idx - max_d..],
+                &mut xcorr_comp[..lag_span],
+                SF_LENGTH_8KHZ,
+                lag_span,
+            );
+
+            let mut cur_d = min_d;
+            let mut cur_basis_ptr_idx = target_ptr_8khz_idx - cur_d;
+            let mut energy_basis = silk_inner_prod_aligned(
+                &frame_8khz[cur_basis_ptr_idx..],
+                &frame_8khz[cur_basis_ptr_idx..],
                 SF_LENGTH_8KHZ,
             );
-            if cross_corr > 0 {
-                let energy_basis = silk_inner_prod_aligned(
-                    &frame_8khz[basis_ptr_idx as usize..],
-                    &frame_8khz[basis_ptr_idx as usize..],
-                    SF_LENGTH_8KHZ,
-                );
-                c_8khz[k * CSTRIDE_8KHZ + (d - (MIN_LAG_8KHZ as i32 - 2)) as usize] =
-                    silk_div32_varq(cross_corr, energy_target.wrapping_add(energy_basis), 14)
-                        as i16;
-            } else {
-                c_8khz[k * CSTRIDE_8KHZ + (d - (MIN_LAG_8KHZ as i32 - 2)) as usize] = 0;
+
+            for j in 0..length_d_comp {
+                let d = d_comp_indices[j] as usize;
+                while cur_d < d {
+                    energy_basis = energy_basis.wrapping_sub(silk_smulbb(
+                        frame_8khz[cur_basis_ptr_idx + SF_LENGTH_8KHZ - 1] as i32,
+                        frame_8khz[cur_basis_ptr_idx + SF_LENGTH_8KHZ - 1] as i32,
+                    ));
+                    cur_basis_ptr_idx -= 1;
+                    energy_basis = energy_basis.wrapping_add(silk_smulbb(
+                        frame_8khz[cur_basis_ptr_idx] as i32,
+                        frame_8khz[cur_basis_ptr_idx] as i32,
+                    ));
+                    cur_d += 1;
+                }
+
+                let cross_corr = xcorr_comp[max_d - d];
+                let out_idx = d - (MIN_LAG_8KHZ - 2);
+                if cross_corr > 0 {
+                    c_8khz[k * CSTRIDE_8KHZ + out_idx] =
+                        silk_div32_varq(cross_corr, energy_target.wrapping_add(energy_basis), 14)
+                            as i16;
+                } else {
+                    c_8khz[k * CSTRIDE_8KHZ + out_idx] = 0;
+                }
             }
         }
         target_ptr_8khz_idx += SF_LENGTH_8KHZ;

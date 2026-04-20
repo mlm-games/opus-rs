@@ -928,6 +928,33 @@ pub fn silk_lpc_analysis_filter(
         return;
     }
 
+    #[cfg(target_arch = "aarch64")]
+    {
+        // NEON-backed inner-product path helps most for larger orders (e.g. d=16)
+        // and can regress small orders due to setup overhead.
+        if d >= 16 {
+            silk_lpc_analysis_filter_aarch64(out, input, b, len, d);
+        } else {
+            silk_lpc_analysis_filter_scalar(out, input, b, len, d);
+        }
+        return;
+    }
+
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        silk_lpc_analysis_filter_scalar(out, input, b, len, d);
+    }
+}
+
+#[inline(always)]
+#[cfg_attr(target_arch = "aarch64", allow(dead_code))]
+fn silk_lpc_analysis_filter_scalar(
+    out: &mut [i16],
+    input: &[i16],
+    b: &[i16],
+    len: usize,
+    d: usize,
+) {
     for out_val in out[..d].iter_mut() {
         *out_val = 0;
     }
@@ -978,6 +1005,31 @@ pub fn silk_lpc_analysis_filter(
 
             *out.get_unchecked_mut(ix) = silk_sat16(out32) as i16;
         }
+    }
+}
+
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+fn silk_lpc_analysis_filter_aarch64(
+    out: &mut [i16],
+    input: &[i16],
+    b: &[i16],
+    len: usize,
+    d: usize,
+) {
+    for out_val in out[..d].iter_mut() {
+        *out_val = 0;
+    }
+
+    let mut b_rev = [0i16; MAX_LPC_ORDER];
+    for k in 0..d {
+        b_rev[d - 1 - k] = b[k];
+    }
+
+    for ix in d..len {
+        let s = silk_inner_prod_aligned(&input[ix - d..ix], &b_rev[..d], d);
+        let out32_q12 = ((input[ix] as i32) << 12).wrapping_sub(s);
+        out[ix] = silk_sat16(silk_rshift_round(out32_q12, 12)) as i16;
     }
 }
 
@@ -1349,5 +1401,50 @@ unsafe fn silk_biquad_alt_stride2_neon(
         vst1q_lane_s32(&mut s[1], s_s32x4, 2);
         vst1q_lane_s32(&mut s[2], s_s32x4, 1);
         vst1q_lane_s32(&mut s[3], s_s32x4, 3);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn lpc_analysis_filter_ref(out: &mut [i16], input: &[i16], b: &[i16], len: usize, d: usize) {
+        out[..d].fill(0);
+        for ix in d..len {
+            let mut s = 0i32;
+            for k in 0..d {
+                s = s.wrapping_add((input[ix - 1 - k] as i32).wrapping_mul(b[k] as i32));
+            }
+            let out32_q12 = ((input[ix] as i32) << 12).wrapping_sub(s);
+            out[ix] = silk_sat16(silk_rshift_round(out32_q12, 12)) as i16;
+        }
+    }
+
+    fn make_signal(len: usize, seed: u32) -> Vec<i16> {
+        let mut s = seed;
+        let mut out = vec![0i16; len];
+        for v in &mut out {
+            s = s.wrapping_mul(1664525).wrapping_add(1013904223);
+            *v = (s >> 16) as i16;
+        }
+        out
+    }
+
+    #[test]
+    fn test_silk_lpc_analysis_filter_matches_reference() {
+        for d in (6usize..=16).step_by(2) {
+            for &len in &[d + 8, d + 31, 160, 320] {
+                let input = make_signal(len, (d as u32) * 17 + len as u32);
+                let b = make_signal(d, 0x1234_5678 ^ d as u32);
+
+                let mut out_opt = vec![0i16; len];
+                let mut out_ref = vec![0i16; len];
+
+                silk_lpc_analysis_filter(&mut out_opt, &input, &b, len, d, 0);
+                lpc_analysis_filter_ref(&mut out_ref, &input, &b, len, d);
+
+                assert_eq!(out_opt, out_ref, "mismatch for d={d}, len={len}");
+            }
+        }
     }
 }
