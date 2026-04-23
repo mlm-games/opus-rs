@@ -1026,15 +1026,7 @@ fn quant_partition_encode(
                 ) << (b0 >> 1);
             } else {
                 cm = quant_partition_encode(
-                    ctx,
-                    x_mid,
-                    mid,
-                    mbits,
-                    b_blocks,
-                    None,
-                    lm,
-                    mid_gain,
-                    fill_mut,
+                    ctx, x_mid, mid, mbits, b_blocks, None, lm, mid_gain, fill_mut,
                 );
                 rebalance = mbits - (rebalance - ctx.remaining_bits);
                 if rebalance > (3 << 3) && sctx.itheta != 0 {
@@ -1097,15 +1089,7 @@ fn quant_partition_encode(
                 mbits += rebalance - (3 << 3);
             }
             cm |= quant_partition_encode(
-                ctx,
-                x_mid,
-                mid,
-                mbits,
-                b_blocks,
-                None,
-                lm,
-                mid_gain,
-                fill_mut,
+                ctx, x_mid, mid, mbits, b_blocks, None, lm, mid_gain, fill_mut,
             );
         }
         cm
@@ -1765,7 +1749,14 @@ fn stereo_split(x: &mut [f32], y: &mut [f32], n: usize) {
 }
 
 #[inline(always)]
-fn intensity_stereo(m: &CeltMode, x: &mut [f32], y: &mut [f32], band_e: &[f32], band: usize, n: usize) {
+fn intensity_stereo(
+    m: &CeltMode,
+    x: &mut [f32],
+    y: &mut [f32],
+    band_e: &[f32],
+    band: usize,
+    n: usize,
+) {
     let left = band_e[band].max(MIN_STEREO_ENERGY);
     let right = band_e[m.nb_ebands + band].max(MIN_STEREO_ENERGY);
     let norm = (left * left + right * right).sqrt().max(MIN_STEREO_ENERGY);
@@ -1793,15 +1784,15 @@ fn special_hybrid_folding(m: &CeltMode, norm: &mut [f32], start: usize, m_val: u
     }
 }
 
-fn prepare_lowband_views<'a>(
-    norm: &'a mut [f32],
+fn prepare_lowband_views(
+    norm: &mut [f32],
     lowband_scratch_ptr: *mut f32,
     allow_lowband_scratch: bool,
     effective_lowband: i32,
     norm_pos: usize,
     n: usize,
     want_out: bool,
-) -> (Option<&'a mut [f32]>, Option<&'a mut [f32]>) {
+) -> (Option<&mut [f32]>, Option<&mut [f32]>) {
     let len = norm.len();
     let out_range = if want_out && norm_pos + n <= len {
         Some((norm_pos, norm_pos + n))
@@ -1824,7 +1815,9 @@ fn prepare_lowband_views<'a>(
     }
 
     if allow_lowband_scratch {
-        unsafe { std::ptr::copy_nonoverlapping(norm.as_ptr().add(lb_start), lowband_scratch_ptr, n) };
+        unsafe {
+            std::ptr::copy_nonoverlapping(norm.as_ptr().add(lb_start), lowband_scratch_ptr, n)
+        };
         let lb = Some(unsafe { std::slice::from_raw_parts_mut(lowband_scratch_ptr, n) });
         let lb_out = out_range.map(|(s, e)| &mut norm[s..e]);
         return (lb, lb_out);
@@ -1851,6 +1844,7 @@ fn prepare_lowband_views<'a>(
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
+#[allow(dead_code)]
 unsafe fn stereo_merge_avx2(x: &mut [f32], y: &mut [f32], mid: f32, side: f32, n: usize) {
     use std::arch::x86_64::*;
 
@@ -1907,7 +1901,7 @@ unsafe fn stereo_merge_avx2(x: &mut [f32], y: &mut [f32], mid: f32, side: f32, n
     }
 }
 
-#[cfg_attr(target_arch = "aarch64", allow(dead_code))]
+#[allow(dead_code)]
 #[inline]
 fn stereo_merge_scalar(x: &mut [f32], y: &mut [f32], mid: f32, side: f32, n: usize) {
     for i in 0..n {
@@ -2461,23 +2455,6 @@ pub fn quant_all_bands(
     *seed = ctx_seed;
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_bitexact_primitives_reference_values() {
-        assert_eq!(bitexact_cos(64), 32767);
-        assert_eq!(bitexact_cos(8192), 23171);
-        assert_eq!(bitexact_cos(16320), 200);
-
-        assert_eq!(bitexact_log2tan(32767, 200), 15059);
-        assert_eq!(bitexact_log2tan(30274, 12540), 2611);
-        assert_eq!(bitexact_log2tan(23171, 23171), 0);
-        assert_eq!(bitexact_log2tan(200, 32767), -15059);
-    }
-}
-
 #[cfg(target_arch = "aarch64")]
 fn compute_band_energy_neon(band: &[f32]) -> f32 {
     use std::arch::aarch64::*;
@@ -3021,4 +2998,21 @@ pub fn anti_collapse(
         }
     }
     seed
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_bitexact_primitives_reference_values() {
+        assert_eq!(bitexact_cos(64), 32767);
+        assert_eq!(bitexact_cos(8192), 23171);
+        assert_eq!(bitexact_cos(16320), 200);
+
+        assert_eq!(bitexact_log2tan(32767, 200), 15059);
+        assert_eq!(bitexact_log2tan(30274, 12540), 2611);
+        assert_eq!(bitexact_log2tan(23171, 23171), 0);
+        assert_eq!(bitexact_log2tan(200, 32767), -15059);
+    }
 }

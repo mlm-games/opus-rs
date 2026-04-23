@@ -83,7 +83,7 @@ fn test_silk_encode_nb_frame1_structure() {
      */
     let icdf_preamble = [192u8, 0u8];
     rc.encode_icdf(0, &icdf_preamble, 8);
-    let bits_after_preamble = rc.tell() as i32;
+    let bits_after_preamble = rc.tell();
     eprintln!("DBG preamble: bits_after_preamble={}", bits_after_preamble);
 
     /* Run VAD before encoding (like the C encoder does) */
@@ -125,7 +125,7 @@ fn test_silk_encode_nb_frame1_structure() {
 
     // Basic sanity checks on the bitstream
     assert!(
-        n_bytes_out >= 5 && n_bytes_out <= 100,
+        (5..=100).contains(&n_bytes_out),
         "Output size {} should be reasonable for NB SILK",
         n_bytes_out
     );

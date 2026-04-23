@@ -13,9 +13,7 @@ fn test_mdct_gain() {
 
     // Input needs n + overlap samples for MDCT forward
     let mut input = vec![0.0f32; n + overlap];
-    for i in 0..input.len() {
-        input[i] = 1.0; // DC signal
-    }
+    input.fill(1.0); // DC signal
 
     let mut freq = vec![0.0f32; n / 2];
     mdct.forward(&input, &mut freq, &window, overlap, 0, 1);

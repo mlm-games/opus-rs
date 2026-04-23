@@ -32,7 +32,7 @@ fn test_mdct_shift3() {
     mode.mdct.forward(
         &input,
         &mut freq,
-        &mode.window,
+        mode.window,
         overlap,
         shift,
         1, // stride=1 for long block
@@ -50,7 +50,7 @@ fn test_mdct_shift3() {
     mode.mdct.backward(
         &freq,
         &mut output,
-        &mode.window,
+        mode.window,
         overlap,
         shift,
         1, // stride=1

@@ -5,10 +5,10 @@ fn test_48k_audio_roundtrip() {
     let sample_rate = 48000;
     let frame_size = 960;
 
-    let mut enc = OpusEncoder::new(sample_rate as i32, 1, Application::Audio).unwrap();
+    let mut enc = OpusEncoder::new(sample_rate, 1, Application::Audio).unwrap();
     enc.bitrate_bps = 64_000;
     enc.complexity = 0;
-    let mut dec = OpusDecoder::new(sample_rate as i32, 1).unwrap();
+    let mut dec = OpusDecoder::new(sample_rate, 1).unwrap();
 
     let mut rng: u32 = 12345;
     let input: Vec<f32> = (0..frame_size)

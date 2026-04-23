@@ -174,7 +174,6 @@ pub fn clt_compute_allocation(
                 psum += c << BITRES;
             }
         }
-        if mid == 9 {}
         if psum > total {
             hi = mid - 1;
         } else {

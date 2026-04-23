@@ -87,7 +87,7 @@ fn test_decode_c_encoded_silk_8khz() {
     println!("SILK hex: {}", hex::encode(silk_payload));
 
     // Create range decoder
-    let mut range_coder = RangeCoder::new_decoder(&silk_payload);
+    let mut range_coder = RangeCoder::new_decoder(silk_payload);
 
     // Decode
     let mut output = vec![0i16; 160];
@@ -170,7 +170,7 @@ fn test_decode_synth_16khz() {
     // TOC byte for 16kHz, 20ms: bandwidth=2 (WB), config=0 (10ms frames x2), stereo=0, code=0
     // Actually, for 20ms frames: config maps to frame durations
     // config 0 = 10ms, 1 = 20ms, 2 = 40ms, 3 = 60ms (for SILK)
-    let toc: u8 = 0b10_001_0_00; // WB, 20ms frame, mono, 1 frame
+    let toc: u8 = 0b1000_1000; // WB, 20ms frame, mono, 1 frame
     println!("TOC for 16kHz 20ms: 0x{:02x}", toc);
 
     // We need actual encoded data to decode, which we don't have

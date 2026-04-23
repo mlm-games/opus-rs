@@ -42,7 +42,7 @@ fn test_down2_3_gain_consistency() {
     println!("Input 24k energy: {}", input_energy_24k);
 
     // Downsample using down2_3 (24kHz -> 16kHz)
-    let output_len = (num_samples_24k * 2 / 3) as usize;
+    let output_len = num_samples_24k * 2 / 3;
     let mut output = vec![0i16; output_len];
     let mut state = [0i32; 6];
 

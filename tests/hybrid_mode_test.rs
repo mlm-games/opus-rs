@@ -103,7 +103,7 @@ fn test_hybrid_mode_bitrate_range() {
         let mut output = vec![0u8; 1500];
         let n = encoder
             .encode(&input, frame_size, &mut output)
-            .expect(&format!("Hybrid encode at {}bps failed", bitrate));
+            .unwrap_or_else(|_| panic!("Hybrid encode at {}bps failed", bitrate));
 
         assert!(n >= 3, "Hybrid packet at {}bps too short: {}", bitrate, n);
         println!("Hybrid at {}bps: {} bytes", bitrate, n);
@@ -137,7 +137,7 @@ fn test_hybrid_mode_consecutive_frames() {
         let mut output = vec![0u8; 1500];
         let n = encoder
             .encode(&input, frame_size, &mut output)
-            .expect(&format!("Hybrid encode frame {} failed", frame_idx));
+            .unwrap_or_else(|_| panic!("Hybrid encode frame {} failed", frame_idx));
 
         assert!(n >= 3, "Frame {}: packet too short: {}", frame_idx, n);
         frame_sizes.push(n);

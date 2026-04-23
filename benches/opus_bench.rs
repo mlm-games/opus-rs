@@ -53,10 +53,7 @@ fn read_wav_f32(path: &str) -> Vec<f32> {
 
     bytes[data_start..]
         .chunks_exact(2)
-        .map(|chunk| {
-            let sample = i16::from_le_bytes([chunk[0], chunk[1]]) as f32 / 32768.0;
-            sample
-        })
+        .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]) as f32 / 32768.0)
         .collect()
 }
 
@@ -96,7 +93,6 @@ fn get_real_audio_frames(sample_rate: u32, frame_ms: usize) -> Vec<Vec<f32>> {
         .map(|c| c.to_vec())
         .collect()
 }
-
 
 fn bench_opus_encode_silk(c: &mut Criterion) {
     let mut group = c.benchmark_group("opus_encode_silk");
@@ -214,7 +210,7 @@ fn bench_lpc_analysis_filter(c: &mut Criterion) {
 
     for &(order, len) in &[(10usize, 320usize), (16, 320), (16, 640)] {
         let x = sine_i16(len + order, 16000, 440);
-        let a_q12: Vec<i16> = (0..order).map(|i| (i as i16 * 128) as i16).collect();
+        let a_q12: Vec<i16> = (0..order).map(|i| i as i16 * 128).collect();
 
         group.throughput(Throughput::Elements(len as u64));
         group.bench_with_input(
@@ -391,22 +387,29 @@ fn bench_silk_nsq(c: &mut Criterion) {
             |b, &(fs_khz, frame_size, nb_subfr, subfr_length, signal_type_val)| {
                 b.iter(|| {
                     // Create fresh state each iteration
-                    let mut s_cmn = SilkEncoderStateCommon::default();
-                    s_cmn.fs_khz = fs_khz;
-                    s_cmn.nb_subfr = nb_subfr as i32;
-                    s_cmn.subfr_length = subfr_length as i32;
-                    s_cmn.frame_length = frame_size as i32;
-                    s_cmn.ltp_mem_length = 20 * fs_khz;
-                    s_cmn.predict_lpc_order = if fs_khz == 16 { 16 } else { 10 };
-                    s_cmn.shaping_lpc_order = 16;
-                    s_cmn.first_frame_after_reset = 1;
-                    s_cmn.indices.nlsf_interp_coef_q2 = 4;
-                    s_cmn.indices.quant_offset_type = 0;
-                    s_cmn.indices.signal_type = signal_type_val;
-                    s_cmn.n_states_delayed_decision = 1;
+                    let s_cmn = SilkEncoderStateCommon {
+                        fs_khz,
+                        nb_subfr: nb_subfr as i32,
+                        subfr_length: subfr_length as i32,
+                        frame_length: frame_size as i32,
+                        ltp_mem_length: 20 * fs_khz,
+                        predict_lpc_order: if fs_khz == 16 { 16 } else { 10 },
+                        shaping_lpc_order: 16,
+                        first_frame_after_reset: 1,
+                        n_states_delayed_decision: 1,
+                        indices: SideInfoIndices {
+                            nlsf_interp_coef_q2: 4,
+                            quant_offset_type: 0,
+                            signal_type: signal_type_val,
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    };
 
-                    let mut nsq = SilkNSQState::default();
-                    nsq.prev_gain_q16 = 65536;
+                    let mut nsq = SilkNSQState {
+                        prev_gain_q16: 65536,
+                        ..Default::default()
+                    };
                     if signal_type_val == TYPE_VOICED as i8 {
                         nsq.prev_sig_type = TYPE_VOICED as i8;
                     }
@@ -566,7 +569,7 @@ fn bench_opus_real(c: &mut Criterion) {
                 b.iter(|| {
                     for frame in &frames[..nf] {
                         let len = enc
-                            .encode(black_box(&frame), fs, black_box(&mut output))
+                            .encode(black_box(frame), fs, black_box(&mut output))
                             .unwrap();
                         dec.decode(black_box(&output[..len]), fs, black_box(&mut pcm))
                             .unwrap();
@@ -578,7 +581,6 @@ fn bench_opus_real(c: &mut Criterion) {
 
     group.finish();
 }
-
 
 fn bench_celt_autocorr(c: &mut Criterion) {
     let mut group = c.benchmark_group("celt_autocorr");

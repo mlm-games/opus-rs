@@ -633,7 +633,7 @@ impl RangeCoder {
                 } else {
                     // If we've busted, don't add too many extra bits to the
                     // last byte; it would corrupt the range coder data.
-                    if self.offs + self.end_offs >= self.storage && (-l as i32) < used {
+                    if self.offs + self.end_offs >= self.storage && -l < used {
                         window &= (1u32 << (-l as u32)) - 1;
                         self.error = -1;
                     }

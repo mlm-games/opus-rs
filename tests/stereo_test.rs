@@ -72,7 +72,7 @@ fn test_stereo_bitrate_range() {
         let mut output = vec![0u8; 1500];
         let n = encoder
             .encode(&input, frame_size, &mut output)
-            .expect(&format!("Encode at {}bps failed", bitrate));
+            .unwrap_or_else(|_| panic!("Encode at {}bps failed", bitrate));
 
         assert!(n >= 3, "Stereo packet at {}bps too short: {}", bitrate, n);
         println!("Stereo at {}bps: {} bytes", bitrate, n);
@@ -194,7 +194,7 @@ fn test_silk_stereo_sample_rates() {
         let mut output = vec![0u8; 500];
         let n = encoder
             .encode(&input, frame_size, &mut output)
-            .expect(&format!("Encode at {}Hz failed", sample_rate));
+            .unwrap_or_else(|_| panic!("Encode at {}Hz failed", sample_rate));
 
         assert!(
             n >= 3,
@@ -304,7 +304,7 @@ fn test_silk_stereo_multiframe() {
         let mut frame_output = vec![0u8; 400];
         let n = encoder
             .encode(frame_input, frame_size, &mut frame_output)
-            .expect(&format!("Encode frame {} failed", frame));
+            .unwrap_or_else(|_| panic!("Encode frame {} failed", frame));
         encoded_frames.push(frame_output[..n].to_vec());
     }
 

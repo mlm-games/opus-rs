@@ -5,38 +5,42 @@ use opus_rs::silk::structs::*;
 
 /// Create a 16kHz wideband encoder state for testing
 fn create_wb_encoder_state() -> SilkEncoderStateCommon {
-    let mut s = SilkEncoderStateCommon::default();
-    s.fs_khz = 16;
-    s.nb_subfr = 4;
-    s.subfr_length = 80; // 5ms * 16kHz
-    s.frame_length = 320; // 20ms * 16kHz
-    s.ltp_mem_length = 320; // PE_LTP_MEM_LENGTH_MS * fs_khz = 20 * 16
-    s.predict_lpc_order = 16;
-    s.shaping_lpc_order = 16;
-    s.first_frame_after_reset = 1;
-    s.indices.nlsf_interp_coef_q2 = 4; // No interpolation
-    s.indices.signal_type = TYPE_UNVOICED as i8;
-    s.indices.quant_offset_type = 0;
-    s.n_states_delayed_decision = 1;
-    s
+    SilkEncoderStateCommon {
+        fs_khz: 16,
+        nb_subfr: 4,
+        subfr_length: 80,    // 5ms * 16kHz
+        frame_length: 320,   // 20ms * 16kHz
+        ltp_mem_length: 320, // PE_LTP_MEM_LENGTH_MS * fs_khz = 20 * 16
+        predict_lpc_order: 16,
+        shaping_lpc_order: 16,
+        first_frame_after_reset: 1,
+        n_states_delayed_decision: 1,
+        indices: SideInfoIndices {
+            signal_type: TYPE_UNVOICED as i8,
+            ..Default::default()
+        },
+        ..Default::default()
+    }
 }
 
 /// Create a 8kHz narrowband encoder state for testing
 fn create_nb_encoder_state() -> SilkEncoderStateCommon {
-    let mut s = SilkEncoderStateCommon::default();
-    s.fs_khz = 8;
-    s.nb_subfr = 4;
-    s.subfr_length = 40; // 5ms * 8kHz
-    s.frame_length = 160; // 20ms * 8kHz
-    s.ltp_mem_length = 160; // PE_LTP_MEM_LENGTH_MS * fs_khz = 20 * 8
-    s.predict_lpc_order = 10;
-    s.shaping_lpc_order = 16;
-    s.first_frame_after_reset = 1;
-    s.indices.nlsf_interp_coef_q2 = 4; // No interpolation
-    s.indices.signal_type = TYPE_UNVOICED as i8;
-    s.indices.quant_offset_type = 0;
-    s.n_states_delayed_decision = 1;
-    s
+    SilkEncoderStateCommon {
+        fs_khz: 8,
+        nb_subfr: 4,
+        subfr_length: 40,    // 5ms * 8kHz
+        frame_length: 160,   // 20ms * 8kHz
+        ltp_mem_length: 160, // PE_LTP_MEM_LENGTH_MS * fs_khz = 20 * 8
+        predict_lpc_order: 10,
+        shaping_lpc_order: 16,
+        first_frame_after_reset: 1,
+        n_states_delayed_decision: 1,
+        indices: SideInfoIndices {
+            signal_type: TYPE_UNVOICED as i8,
+            ..Default::default()
+        },
+        ..Default::default()
+    }
 }
 
 /// Generate synthetic unvoiced (noise-like) input
@@ -87,8 +91,10 @@ fn create_pred_coefs() -> Vec<i16> {
 #[test]
 fn test_nsq_unvoiced_basic() {
     let s_cmn = create_wb_encoder_state();
-    let mut nsq = SilkNSQState::default();
-    nsq.prev_gain_q16 = 65536; // gain = 1.0 in Q16
+    let mut nsq = SilkNSQState {
+        prev_gain_q16: 65536,
+        ..Default::default()
+    }; // gain = 1.0 in Q16
 
     let input = generate_unvoiced_input(s_cmn.frame_length as usize);
     let mut pulses = vec![0i8; s_cmn.frame_length as usize];
@@ -158,9 +164,11 @@ fn test_nsq_voiced_basic() {
     s_cmn.indices.signal_type = TYPE_VOICED as i8;
     s_cmn.first_frame_after_reset = 0;
 
-    let mut nsq = SilkNSQState::default();
-    nsq.prev_gain_q16 = 65536;
-    nsq.prev_sig_type = TYPE_VOICED as i8;
+    let mut nsq = SilkNSQState {
+        prev_gain_q16: 65536,
+        prev_sig_type: TYPE_VOICED as i8,
+        ..Default::default()
+    };
 
     let pitch = 100; // ~160Hz
     let input = generate_voiced_input(s_cmn.frame_length as usize, pitch);
@@ -221,8 +229,10 @@ fn test_nsq_del_dec_basic() {
     s_cmn.n_states_delayed_decision = 2; // NSQ_MAX_STATES_OPERATING = 2
     s_cmn.indices.signal_type = TYPE_UNVOICED as i8;
 
-    let mut nsq = SilkNSQState::default();
-    nsq.prev_gain_q16 = 65536;
+    let mut nsq = SilkNSQState {
+        prev_gain_q16: 65536,
+        ..Default::default()
+    };
 
     let input = generate_unvoiced_input(s_cmn.frame_length as usize);
     let mut pulses = vec![0i8; s_cmn.frame_length as usize];
@@ -273,8 +283,10 @@ fn test_nsq_del_dec_basic() {
 #[test]
 fn test_nsq_silent_input() {
     let s_cmn = create_wb_encoder_state();
-    let mut nsq = SilkNSQState::default();
-    nsq.prev_gain_q16 = 65536;
+    let mut nsq = SilkNSQState {
+        prev_gain_q16: 65536,
+        ..Default::default()
+    };
 
     // Zero input
     let input = vec![0i16; s_cmn.frame_length as usize];
@@ -322,8 +334,10 @@ fn test_nsq_gain_scaling() {
     let s_cmn = create_wb_encoder_state();
 
     // Test with low gain
-    let mut nsq_low = SilkNSQState::default();
-    nsq_low.prev_gain_q16 = 65536;
+    let mut nsq_low = SilkNSQState {
+        prev_gain_q16: 65536,
+        ..Default::default()
+    };
     let input = generate_unvoiced_input(s_cmn.frame_length as usize);
     let mut pulses_low = vec![0i8; s_cmn.frame_length as usize];
 
@@ -358,8 +372,10 @@ fn test_nsq_gain_scaling() {
     );
 
     // High gain
-    let mut nsq_high = SilkNSQState::default();
-    nsq_high.prev_gain_q16 = 65536;
+    let mut nsq_high = SilkNSQState {
+        prev_gain_q16: 65536,
+        ..Default::default()
+    };
     let mut pulses_high = vec![0i8; s_cmn.frame_length as usize];
     let gains_high = vec![131072i32; MAX_NB_SUBFR]; // 2.0 in Q16
     silk_nsq(
@@ -398,6 +414,7 @@ fn test_nsq_gain_scaling() {
 }
 
 /// Helper function to run silk_nsq and return the output
+#[allow(clippy::too_many_arguments)]
 fn run_nsq_and_capture(
     s_cmn: &SilkEncoderStateCommon,
     input: &[i16],
@@ -412,8 +429,10 @@ fn run_nsq_and_capture(
     lambda_q10: i32,
     ltp_scale_q14: i32,
 ) -> (Vec<i8>, SilkNSQState) {
-    let mut nsq = SilkNSQState::default();
-    nsq.prev_gain_q16 = 65536;
+    let mut nsq = SilkNSQState {
+        prev_gain_q16: 65536,
+        ..Default::default()
+    };
     if s_cmn.indices.signal_type == TYPE_VOICED as i8 {
         nsq.prev_sig_type = TYPE_VOICED as i8;
     }

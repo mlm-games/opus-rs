@@ -85,9 +85,7 @@ fn celt_synthesis_chain_bypass() {
 
         // Read output (before de-emphasis)
         let mut pcm_frame = vec![0.0f32; frame_size];
-        for i in 0..frame_size {
-            pcm_frame[i] = decode_mem[out_syn_idx + i];
-        }
+        pcm_frame[..frame_size].copy_from_slice(&decode_mem[out_syn_idx..out_syn_idx + frame_size]);
 
         // De-emphasis
         let mut m = dec_preemph_mem;
@@ -251,7 +249,7 @@ fn celt_energy_roundtrip_only() {
         );
 
         // Encode coarse + fine energy
-        let total_bits = (n_bytes * 8) as i32;
+        let total_bits = n_bytes * 8;
         let mut error = vec![0.0f32; nb_ebands * channels];
         let mut rc = RangeCoder::new_encoder(n_bytes as u32);
 
@@ -263,7 +261,7 @@ fn celt_energy_roundtrip_only() {
             mode,
             0,
             nb_ebands,
-            &mut band_log_e,
+            &band_log_e,
             &mut enc_old_band_e,
             (total_bits << 3) as u32,
             &mut error,
@@ -342,7 +340,7 @@ fn celt_energy_roundtrip_only() {
             &mut error,
             &ebits,
             &fine_priority,
-            (total_bits - rc.tell() as i32) << 3,
+            (total_bits - rc.tell()) << 3,
             &mut rc,
             channels,
         );
@@ -377,9 +375,7 @@ fn celt_energy_roundtrip_only() {
         );
 
         let mut pcm_frame = vec![0.0f32; frame_size];
-        for i in 0..frame_size {
-            pcm_frame[i] = decode_mem[out_syn_idx + i];
-        }
+        pcm_frame[..frame_size].copy_from_slice(&decode_mem[out_syn_idx..out_syn_idx + frame_size]);
 
         let mut m = dec_preemph_mem;
         for i in 0..frame_size {

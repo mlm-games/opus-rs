@@ -15,11 +15,11 @@ fn test_mdct_loopback() {
     }
 
     let mut freq = vec![0.0f32; n2];
-    mdct.forward(&input, &mut freq, &mode.window, overlap, 0, 1);
+    mdct.forward(&input, &mut freq, mode.window, overlap, 0, 1);
 
     // MDCT backward outputs n + overlap samples
     let mut output = vec![0.0f32; n + overlap];
-    mdct.backward(&freq, &mut output, &mode.window, overlap, 0, 1);
+    mdct.backward(&freq, &mut output, mode.window, overlap, 0, 1);
 
     // Check loopback SNR in the valid range
     let mut sig_nrg = 0.0;

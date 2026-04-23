@@ -365,7 +365,6 @@ impl OpusEncoder {
             mode = OpusMode::SilkOnly;
         }
 
-
         if mode == OpusMode::CeltOnly {
             match frame_rate {
                 400 | 200 | 100 | 50 => {}
@@ -576,8 +575,10 @@ impl OpusEncoder {
             // For Hybrid CBR, force SILK to use VBR (matching C behavior)
             let silk_use_cbr = if mode == OpusMode::Hybrid && self.use_cbr {
                 0
+            } else if self.use_cbr {
+                1
             } else {
-                if self.use_cbr { 1 } else { 0 }
+                0
             };
             let ret = silk_encode(
                 &mut self.silk_enc,
@@ -1084,8 +1085,8 @@ impl OpusDecoder {
         let top = mode.eff_ebands;
         if mode_from_toc(toc) == OpusMode::CeltOnly && toc >= 0x80 {
             const FROM_OPUS_TABLE: [u8; 16] = [
-                0x80, 0x88, 0x90, 0x98, 0x40, 0x48, 0x50, 0x58, 0x20, 0x28, 0x30, 0x38,
-                0x00, 0x08, 0x10, 0x18,
+                0x80, 0x88, 0x90, 0x98, 0x40, 0x48, 0x50, 0x58, 0x20, 0x28, 0x30, 0x38, 0x00, 0x08,
+                0x10, 0x18,
             ];
             let idx = ((toc >> 3) - 16) as usize;
             let data0 = FROM_OPUS_TABLE[idx] | (toc & 0x7);

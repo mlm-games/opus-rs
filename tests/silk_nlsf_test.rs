@@ -15,7 +15,7 @@ fn test_nlsf_encode_decode_nb_mb() {
     let nlsf_original = [
         3000i16, 6000, 9000, 12000, 15000, 18000, 21000, 24000, 27000, 30000,
     ];
-    let mut nlsf_quantized = nlsf_original.clone();
+    let mut nlsf_quantized = nlsf_original;
 
     // Weights for rate-distortion optimization (Q2 format)
     let weights = [4i16; MAX_LPC_ORDER];
@@ -26,7 +26,7 @@ fn test_nlsf_encode_decode_nb_mb() {
     let rd_q25 = silk_nlsf_encode(
         &mut indices,
         &mut nlsf_quantized,
-        &cb,
+        cb,
         &weights[..order],
         100,         // nlsf_mu_q20: rate weight
         4,           // n_survivors
@@ -41,7 +41,7 @@ fn test_nlsf_encode_decode_nb_mb() {
 
     // Decode
     let mut nlsf_decoded = [0i16; MAX_LPC_ORDER];
-    silk_nlsf_decode(&mut nlsf_decoded, &indices, &cb);
+    silk_nlsf_decode(&mut nlsf_decoded, &indices, cb);
 
     println!("  Decoded NLSF: {:?}", &nlsf_decoded[..order]);
 
@@ -96,7 +96,7 @@ fn test_nlsf_encode_decode_wb() {
         2000i16, 4000, 6000, 8000, 10000, 12000, 14000, 16000, 18000, 20000, 22000, 24000, 26000,
         28000, 30000, 31000,
     ];
-    let mut nlsf_quantized = nlsf_original.clone();
+    let mut nlsf_quantized = nlsf_original;
 
     let weights = [4i16; MAX_LPC_ORDER];
     let mut indices = [0i8; MAX_LPC_ORDER + 1];
@@ -105,7 +105,7 @@ fn test_nlsf_encode_decode_wb() {
     let rd_q25 = silk_nlsf_encode(
         &mut indices,
         &mut nlsf_quantized,
-        &cb,
+        cb,
         &weights[..order],
         100, // nlsf_mu_q20
         4,   // n_survivors
@@ -120,7 +120,7 @@ fn test_nlsf_encode_decode_wb() {
 
     // Decode
     let mut nlsf_decoded = [0i16; MAX_LPC_ORDER];
-    silk_nlsf_decode(&mut nlsf_decoded, &indices, &cb);
+    silk_nlsf_decode(&mut nlsf_decoded, &indices, cb);
 
     println!("  Decoded NLSF: {:?}", &nlsf_decoded[..order]);
 
@@ -171,7 +171,7 @@ fn test_nlsf_stability() {
     silk_nlsf_encode(
         &mut indices,
         &mut nlsf,
-        &cb,
+        cb,
         &weights[..order],
         100,
         4,
@@ -182,7 +182,7 @@ fn test_nlsf_stability() {
 
     // Decode
     let mut nlsf_decoded = [0i16; MAX_LPC_ORDER];
-    silk_nlsf_decode(&mut nlsf_decoded, &indices, &cb);
+    silk_nlsf_decode(&mut nlsf_decoded, &indices, cb);
 
     println!("  After decoding: {:?}", &nlsf_decoded[..order]);
 
