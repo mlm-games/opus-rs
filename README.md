@@ -7,7 +7,7 @@ A pure-Rust implementation of the [Opus audio codec](https://opus-codec.org/) (R
 ## Features
 
 - **Pure Rust** — no C dependencies
-- **High Performance:** At or faster than C libopus across all configurations on X64/AARCH64 
+- **High Performance:** Competitive with C libopus on x64/aarch64
 
 ## Quick Start
 
@@ -38,7 +38,7 @@ cargo run --example wav_test
 
 ## Performance
 
-Criterion benchmarks with 20 samples, real audio (902/1804 frames of real speech), mono encode + decode. All numbers are wall-clock time for the full frame set.
+Criterion benchmark (`cargo bench --bench opus_vs_c_bench`) with 20 samples, 100 ms warm-up, 500 ms measurement, real speech input (`fixtures/answer_16k.wav`), mono encode-only. All numbers below are wall-clock time for the full frame set.
 
 ### vs C Opus (libopus 1.6.1) on x86-64 (AVX2/FMA)
 
@@ -54,15 +54,15 @@ Measured on AMD Ryzen 7 5700X, compiled with `--release` (opt-level=3 + ThinLTO)
 
 ### vs C Opus (libopus 1.6.1) on Apple Silicon
 
-Measured on Apple Silicon M-series (aarch64), compiled with `--release` (opt-level=3 + ThinLTO).
+Measured on Apple Silicon M-series (aarch64), compiled with `--release` (opt-level=3 + ThinLTO), latest run on 2026-04-23.
 
 | Config | Pure Rust | C Opus | Ratio |
 |--------|-----------|--------|-------|
-| 8 kHz / 20 ms VoIP | **33.06 ms** | 34.26 ms | 0.96× (**Rust 4% faster**) |
-| 16 kHz / 20 ms VoIP | **55.62 ms** | 56.11 ms | 0.99× (**Rust 1% faster**) |
-| 16 kHz / 10 ms VoIP | 63.28 ms | **62.50 ms** | 1.01× (C 1% faster) |
-| 48 kHz / 20 ms Audio | **22.40 ms** | 30.46 ms | 0.74× (**Rust 26% faster**) |
-| 48 kHz / 10 ms Audio | **25.25 ms** | 31.57 ms | 0.80× (**Rust 20% faster**) |
+| 8 kHz / 20 ms VoIP | 31.47 ms | **31.20 ms** | 1.01× (C 0.9% faster) |
+| 16 kHz / 20 ms VoIP | **51.19 ms** | 52.81 ms | 0.97× (**Rust 3.1% faster**) |
+| 16 kHz / 10 ms VoIP | 55.69 ms | **55.49 ms** | 1.00× (within noise) |
+| 48 kHz / 20 ms Audio | **13.97 ms** | 19.39 ms | 0.72× (**Rust 28% faster**) |
+| 48 kHz / 10 ms Audio | **16.19 ms** | 20.28 ms | 0.80× (**Rust 20% faster**) |
 
 
 ## License

@@ -377,11 +377,9 @@ fn interp_bits2pulses(
         coded_bands -= 1;
     }
 
-    let mut intensity_rsv_final = intensity_rsv;
-    if intensity_rsv_final > 0 {
+    if intensity_rsv > 0 {
         if encode {
             *intensity = min(*intensity, coded_bands as i32);
-            *intensity = max(*intensity, start as i32);
             rc.enc_uint(
                 (*intensity - start as i32) as u32,
                 (coded_bands + 1 - start) as u32,
@@ -389,11 +387,9 @@ fn interp_bits2pulses(
         } else {
             *intensity = start as i32 + rc.dec_uint((coded_bands + 1 - start) as u32) as i32;
         }
-        intensity_rsv_final = LOG2_FRAC_TABLE[*intensity as usize - start] as i32;
     } else {
         *intensity = 0;
     }
-    total_with_rsv -= intensity_rsv - intensity_rsv_final;
 
     let mut dual_stereo_rsv_final = dual_stereo_rsv;
     if *intensity <= start as i32 {

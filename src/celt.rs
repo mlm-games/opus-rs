@@ -89,6 +89,41 @@ const INV_TABLE: [u8; 128] = [
 
 const MAX_TRANSIENT_LEN: usize = 3000;
 
+#[derive(Debug, Clone, Copy)]
+pub struct AnalysisInfo {
+    pub valid: bool,
+    pub tonality: f32,
+    pub tonality_slope: f32,
+    pub noisiness: f32,
+    pub activity: f32,
+    pub music_prob: f32,
+    pub music_prob_min: f32,
+    pub music_prob_max: f32,
+    pub bandwidth: i32,
+    pub activity_probability: f32,
+    pub max_pitch_ratio: f32,
+    pub leak_boost: [u8; 19], // LEAK_BANDS = 19
+}
+
+impl Default for AnalysisInfo {
+    fn default() -> Self {
+        Self {
+            valid: false,
+            tonality: 0.0,
+            tonality_slope: 0.0,
+            noisiness: 0.0,
+            activity: 0.0,
+            music_prob: 0.0,
+            music_prob_min: 0.0,
+            music_prob_max: 0.0,
+            bandwidth: 0,
+            activity_probability: 0.0,
+            max_pitch_ratio: 1.0,
+            leak_boost: [0; 19],
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn transient_analysis(
     input: &[f32],
@@ -1105,6 +1140,9 @@ fn run_prefilter(
     pitch_buf: &mut [f32],
     before: &mut [f32],
     after: &mut [f32],
+
+    analysis: &AnalysisInfo,
+    loss_rate: i32,
 ) -> (bool, f32, usize) {
     let max_period = COMBFILTER_MAXPERIOD;
     let min_period = COMBFILTER_MINPERIOD;
@@ -1146,6 +1184,18 @@ fn run_prefilter(
         prefilter_gain,
     );
     let mut gain1 = gain1_raw * 0.7;
+
+    // Apply max_pitch_ratio from analysis if available
+    if analysis.valid {
+        gain1 *= analysis.max_pitch_ratio;
+    }
+
+    // Apply loss_rate scaling: halve at 2%, quarter at 4%, zero at 8%
+    if loss_rate >= 8 {
+        gain1 = 0.0;
+    } else if loss_rate > 0 {
+        gain1 *= 1.0 - (loss_rate as f32) / 8.0;
+    }
 
     let mut pf_threshold = 0.2f32;
     if (pitch_index as i32 - prefilter_period as i32).unsigned_abs() as usize * 10 > pitch_index {
@@ -1325,6 +1375,9 @@ pub struct CeltEncoder {
 
     w_transient_tmp: Vec<f32>,
     w_transient_tmp2: Vec<f32>,
+
+    analysis: AnalysisInfo,
+    loss_rate: i32,
 }
 
 const INTEN_THRESHOLDS: [i32; 21] = [
@@ -1623,6 +1676,9 @@ impl CeltEncoder {
             w_transient_tmp: vec![0.0; MAX_TRANSIENT_LEN],
             w_transient_tmp2: vec![0.0; MAX_TRANSIENT_LEN / 2],
             consec_transient: 0,
+
+            analysis: AnalysisInfo::default(),
+            loss_rate: 0,
         }
     }
 
@@ -1729,7 +1785,16 @@ impl CeltEncoder {
             false
         };
 
-        let pf_enabled = start_band == 0 && self.complexity >= 5;
+        // Check for pure tone: if tonality is very high, bypass pitch search
+        let toneishness = if self.analysis.valid {
+            self.analysis.tonality
+        } else {
+            0.0
+        };
+        let _tone_freq = 0.0f32; // Would be set from analysis if available
+
+        let pf_enabled =
+            start_band == 0 && self.complexity >= 5 && toneishness < 0.99 && channels == 1;
         let (pf_on, gain1, pitch_index) = if pf_enabled {
             run_prefilter(
                 in_buf,
@@ -1746,6 +1811,8 @@ impl CeltEncoder {
                 &mut self.w_prefilter_pitch_buf,
                 &mut self.w_prefilter_before,
                 &mut self.w_prefilter_after,
+                &self.analysis,
+                self.loss_rate,
             )
         } else {
             (false, 0.0f32, COMBFILTER_MINPERIOD)
@@ -1759,11 +1826,8 @@ impl CeltEncoder {
         for c in 0..channels {
             let channel_offset = c * syn_mem_size;
             let in_buf_offset = c * buf_stride;
-            self.syn_mem[channel_offset + syn_mem_size - overlap
-                ..channel_offset + syn_mem_size]
-                .copy_from_slice(
-                    &in_buf[in_buf_offset + frame_size..in_buf_offset + buf_stride],
-                );
+            self.syn_mem[channel_offset + syn_mem_size - overlap..channel_offset + syn_mem_size]
+                .copy_from_slice(&in_buf[in_buf_offset + frame_size..in_buf_offset + buf_stride]);
         }
 
         let freq = &mut self.w_freq[..frame_size * channels];
@@ -2156,6 +2220,7 @@ impl CeltEncoder {
             lm as i32,
             self.last_coded_bands,
             resynth,
+            false,
             &mut 0u32,
         );
 
@@ -2333,7 +2398,7 @@ impl CeltDecoder {
     }
 
     pub fn decode(&mut self, compressed: &[u8], frame_size: usize, pcm: &mut [f32]) -> usize {
-        self.decode_impl(compressed, frame_size, pcm, 0)
+        self.decode_impl(compressed, frame_size, pcm, 0, self.mode.nb_ebands)
     }
 
     pub fn decode_with_start_band(
@@ -2343,7 +2408,7 @@ impl CeltDecoder {
         pcm: &mut [f32],
         start_band: usize,
     ) -> usize {
-        self.decode_impl(compressed, frame_size, pcm, start_band)
+        self.decode_impl(compressed, frame_size, pcm, start_band, self.mode.nb_ebands)
     }
 
     pub fn decode_from_range_coder(
@@ -2354,7 +2419,26 @@ impl CeltDecoder {
         pcm: &mut [f32],
         start_band: usize,
     ) -> usize {
-        self.decode_impl_from_rc(rc, total_bits, frame_size, pcm, start_band)
+        self.decode_impl_from_rc(
+            rc,
+            total_bits,
+            frame_size,
+            pcm,
+            start_band,
+            self.mode.nb_ebands,
+        )
+    }
+
+    pub fn decode_from_range_coder_with_band_range(
+        &mut self,
+        rc: &mut RangeCoder,
+        total_bits: i32,
+        frame_size: usize,
+        pcm: &mut [f32],
+        start_band: usize,
+        end_band: usize,
+    ) -> usize {
+        self.decode_impl_from_rc(rc, total_bits, frame_size, pcm, start_band, end_band)
     }
 
     fn decode_impl(
@@ -2363,10 +2447,11 @@ impl CeltDecoder {
         frame_size: usize,
         pcm: &mut [f32],
         start_band: usize,
+        end_band: usize,
     ) -> usize {
         let total_bits = (compressed.len() * 8) as i32;
         let mut rc = RangeCoder::new_decoder(compressed);
-        self.decode_impl_from_rc(&mut rc, total_bits, frame_size, pcm, start_band)
+        self.decode_impl_from_rc(&mut rc, total_bits, frame_size, pcm, start_band, end_band)
     }
 
     fn decode_impl_from_rc(
@@ -2376,10 +2461,12 @@ impl CeltDecoder {
         frame_size: usize,
         pcm: &mut [f32],
         start_band: usize,
+        end_band: usize,
     ) -> usize {
         let mode = self.mode;
         let channels = self.channels;
         let nb_ebands = mode.nb_ebands;
+        let end_band = end_band.min(nb_ebands).max(start_band);
         let overlap = mode.overlap;
 
         let mut lm = 0;
@@ -2433,19 +2520,25 @@ impl CeltDecoder {
         }
         let short_blocks = is_transient;
 
+        let intra_ener = if rc.tell() + 3 <= total_bits {
+            rc.decode_bit_logp(3)
+        } else {
+            false
+        };
+
         unquant_coarse_energy(
             mode,
             start_band,
-            nb_ebands,
+            end_band,
             &mut self.old_band_e,
-            total_bits as u32,
+            intra_ener,
             rc,
             channels,
             lm,
         );
         self.w_tf_res[..nb_ebands].fill(0);
         let tf_res = &mut self.w_tf_res[..nb_ebands];
-        tf_decode(start_band, nb_ebands, is_transient, tf_res, lm as i32, rc);
+        tf_decode(start_band, end_band, is_transient, tf_res, lm as i32, rc);
 
         let spread_decision = if rc.tell() + 4 <= total_bits {
             rc.decode_icdf(&SPREAD_ICDF, 5)
@@ -2468,7 +2561,7 @@ impl CeltDecoder {
         let mut dynalloc_logp = 6i32;
         let mut total_bits_bitres = total_bits << BITRES;
         let mut tell_frac = rc.tell_frac();
-        for i in start_band..nb_ebands {
+        for i in start_band..end_band {
             let width =
                 channels as i32 * (mode.e_bands[i + 1] - mode.e_bands[i]) as i32 * (1 << lm);
             let quanta = (width << BITRES).min((6i32 << BITRES).max(width));
@@ -2527,7 +2620,7 @@ impl CeltDecoder {
         let coded_bands = clt_compute_allocation(
             mode,
             start_band,
-            nb_ebands,
+            end_band,
             offsets,
             cap,
             alloc_trim,
@@ -2543,13 +2636,13 @@ impl CeltDecoder {
             rc,
             false,
             0,
-            nb_ebands as i32 - 1,
+            end_band as i32 - 1,
         );
 
         unquant_fine_energy(
             mode,
             start_band,
-            nb_ebands,
+            end_band,
             &mut self.old_band_e,
             ebits,
             rc,
@@ -2578,7 +2671,7 @@ impl CeltDecoder {
             false,
             mode,
             start_band,
-            nb_ebands,
+            end_band,
             x_split,
             y_opt,
             collapse_masks,
@@ -2595,6 +2688,7 @@ impl CeltDecoder {
             lm as i32,
             coded_bands,
             true,
+            false,
             &mut self.rng,
         );
         // Trace X values for comparison with C decoder
@@ -2606,7 +2700,7 @@ impl CeltDecoder {
         unquant_energy_finalise(
             mode,
             start_band,
-            nb_ebands,
+            end_band,
             &mut self.old_band_e,
             ebits,
             fine_priority,
@@ -2643,7 +2737,7 @@ impl CeltDecoder {
             freq,
             band_amp,
             start_band,
-            nb_ebands,
+            end_band,
             channels,
             (1 << lm) as usize,
         );

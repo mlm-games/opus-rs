@@ -340,45 +340,39 @@ pub fn unquant_coarse_energy(
     start: usize,
     end: usize,
     old_e_bands: &mut [f32],
-    budget: u32,
+    intra: bool,
     dec: &mut RangeCoder,
     channels: usize,
     lm: usize,
 ) {
-    let intra: bool;
-    let tell = dec.tell();
-    if tell + 3 <= budget as i32 {
-        intra = dec.decode_bit_logp(3);
-    } else {
-        intra = false;
-    }
     let prob_model = &E_PROB_MODEL[lm][if intra { 1 } else { 0 }];
     let coef = if intra { 0.0 } else { PRED_COEF[lm] };
     let beta = if intra { BETA_INTRA } else { BETA_COEF[lm] };
     debug_assert!(channels <= 2);
     let mut prev = [0.0f32; 2];
+    let budget = (dec.storage * 8) as i32;
 
     for i in start..end {
         for c in 0..channels {
-            // Clamp in-place, matching C: oldEBands[i] = MAXG(-GCONST(9.f), oldEBands[i])
-            old_e_bands[c * m.nb_ebands + i] = old_e_bands[c * m.nb_ebands + i].max(-9.0);
-            let old_e = old_e_bands[c * m.nb_ebands + i];
-
             let qi;
             let tell = dec.tell();
-            if tell + 15 <= budget as i32 {
+            if budget - tell >= 15 {
                 let prob_idx = 2 * i.min(20);
                 let fs = (prob_model[prob_idx] as u32) << 7;
                 let decay = (prob_model[prob_idx + 1] as i32) << 6;
                 qi = dec.laplace_decode(fs, decay);
-            } else if tell + 2 <= budget as i32 {
+            } else if budget - tell >= 2 {
                 let s = dec.decode_icdf(&SMALL_ENERGY_ICDF, 2);
                 qi = (s >> 1) ^ -(s & 1);
-            } else if tell < budget as i32 {
+            } else if budget - tell >= 1 {
                 qi = if dec.decode_bit_logp(1) { -1 } else { 0 };
             } else {
                 qi = -1;
             }
+
+            // Clamp in-place, matching C: oldEBands[i] = MAXG(-GCONST(9.f), oldEBands[i])
+            old_e_bands[c * m.nb_ebands + i] = old_e_bands[c * m.nb_ebands + i].max(-9.0);
+            let old_e = old_e_bands[c * m.nb_ebands + i];
 
             let q = qi as f32;
             let tmp = coef * old_e + prev[c] + q;
@@ -401,7 +395,7 @@ pub fn quant_fine_energy(
 ) {
     for i in start..end {
         for c in 0..channels {
-            let bits = fine_quant[c * m.nb_ebands + i];
+            let bits = fine_quant[i];
             if bits <= 0 {
                 continue;
             }
@@ -426,7 +420,7 @@ pub fn unquant_fine_energy(
 ) {
     for i in start..end {
         for c in 0..channels {
-            let bits = fine_quant[c * m.nb_ebands + i];
+            let bits = fine_quant[i];
             if bits <= 0 {
                 continue;
             }
@@ -584,12 +578,13 @@ mod tests {
         let mut dec = RangeCoder::new_decoder(&enc.buf);
 
         let mut decoded_old_e_bands = vec![0.0; mode.nb_ebands];
+        let intra = dec.decode_bit_logp(3);
         unquant_coarse_energy(
             mode,
             0,
             mode.nb_ebands,
             &mut decoded_old_e_bands,
-            10000,
+            intra,
             &mut dec,
             1,
             3,

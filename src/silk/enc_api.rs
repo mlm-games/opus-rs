@@ -580,6 +580,10 @@ pub fn silk_encode(
                     }
                 }
             }
+
+            if ps_enc.s_cmn.n_channels == 2 {
+                silk_encode_stereo(rc, 0, 0, 1);
+            }
         }
 
         silk_control_snr(&mut ps_enc.s_cmn, frame_rate_bps);

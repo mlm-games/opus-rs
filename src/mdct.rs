@@ -254,24 +254,6 @@ impl MdctLookup {
 
         let (trig, _) = self.get_trig(shift);
 
-        if std::env::var("MDCT_DBG").is_ok() && stride > 1 {
-            eprintln!(
-                "MDCT backward: n={} n2={} n4={} overlap2={} shift={} stride={}",
-                n, n2, n4, overlap2, shift, stride
-            );
-            eprintln!(
-                "  input[0]={} input[stride]={} input[2*stride]={}",
-                input[0],
-                input[stride],
-                input[2 * stride]
-            );
-            eprintln!(
-                "  input[stride*(n2-1)]={} input[stride*(n2-3)]={}",
-                input[stride * (n2 - 1)],
-                input[stride * (n2 - 3)]
-            );
-        }
-
         let mut f2_buf = [MaybeUninit::<KissCpx>::uninit(); MAX_N4];
 
         let f2 = unsafe { std::slice::from_raw_parts_mut(f2_buf.as_mut_ptr() as *mut KissCpx, n4) };

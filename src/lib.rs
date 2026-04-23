@@ -79,6 +79,7 @@ pub struct OpusEncoder {
     buf_silk_input: Vec<i16>,
     buf_stereo_mid: Vec<i16>,
     buf_stereo_side: Vec<i16>,
+    buf_celt_input: Vec<f32>,
     down2_state_first: [i32; 2],
     down2_state_second: [i32; 2],
     down2_3_state: [i32; 6],
@@ -290,6 +291,7 @@ impl OpusEncoder {
             buf_silk_input: Vec::new(),
             buf_stereo_mid: Vec::new(),
             buf_stereo_side: Vec::new(),
+            buf_celt_input: Vec::new(),
             down2_state_first: [0; 2],
             down2_state_second: [0; 2],
             down2_3_state: [0; 6],
@@ -362,6 +364,7 @@ impl OpusEncoder {
         {
             mode = OpusMode::SilkOnly;
         }
+
 
         if mode == OpusMode::CeltOnly {
             match frame_rate {
@@ -612,9 +615,22 @@ impl OpusEncoder {
             let start_band = if mode == OpusMode::Hybrid { 17 } else { 0 };
             let total_packet_bits = ((n_bytes - 1) * 8) as i32;
 
+            let celt_input: &[f32] = if self.channels == 1 {
+                input
+            } else {
+                let n = frame_size * self.channels;
+                self.buf_celt_input.resize(n, 0.0);
+                for i in 0..frame_size {
+                    for ch in 0..self.channels {
+                        self.buf_celt_input[ch * frame_size + i] = input[i * self.channels + ch];
+                    }
+                }
+                &self.buf_celt_input
+            };
+
             if self.rc.tell() <= total_packet_bits {
                 self.celt_enc.encode_with_budget(
-                    input,
+                    celt_input,
                     frame_size,
                     &mut self.rc,
                     start_band,
@@ -710,6 +726,7 @@ pub struct OpusDecoder {
     w_pcm_i16: Vec<i16>,
     w_silk_out: Vec<f32>,
     w_pcm_resampled: Vec<i16>,
+    w_celt_planar: Vec<f32>,
     w_celt_out: Vec<f32>,
 }
 
@@ -746,6 +763,7 @@ impl OpusDecoder {
 
             w_silk_out: vec![0.0f32; 5760 * channels],
             w_pcm_resampled: vec![0i16; 5760 * channels],
+            w_celt_planar: vec![0.0f32; 5760 * channels],
             w_celt_out: vec![0.0f32; 5760 * channels],
         })
     }
@@ -856,12 +874,13 @@ impl OpusDecoder {
                 let decoded_samples = ret as usize;
 
                 if self.sampling_rate == internal_sample_rate {
-                    let n = decoded_samples.min(frame_size).min(output.len());
-                    for i in 0..n {
+                    let frames = decoded_samples.min(frame_size);
+                    let total = (frames * self.channels).min(output.len());
+                    for i in 0..total {
                         output[i] = self.w_pcm_i16[i] as f32 / 32768.0;
                     }
                     self.prev_mode = Some(OpusMode::SilkOnly);
-                    Ok(n)
+                    Ok(frames)
                 } else {
                     if internal_sample_rate != self.prev_internal_rate {
                         self.silk_resampler
@@ -886,29 +905,53 @@ impl OpusDecoder {
                     };
                     let _ = ret2;
 
-                    let n = out_len.min(output.len());
-                    for i in 0..n {
+                    let frames = out_len.min(frame_size);
+                    let total = (frames * self.channels).min(output.len());
+                    for i in 0..total {
                         output[i] = self.w_pcm_resampled[i] as f32 / 32768.0;
                     }
                     self.prev_mode = Some(OpusMode::SilkOnly);
-                    Ok(n)
+                    Ok(frames)
                 }
             }
 
             OpusMode::CeltOnly => {
                 let mut rc = RangeCoder::new_decoder(payload_data);
                 let total_bits = (payload_data.len() * 8) as i32;
+                let celt_end_band = self.celt_end_band_from_toc(toc);
                 let needed = frame_size * self.channels;
                 if output.len() < needed {
                     return Err("Output buffer too small");
                 }
-                self.celt_dec.decode_from_range_coder(
-                    &mut rc,
-                    total_bits,
-                    frame_size,
-                    &mut output[..needed],
-                    0,
-                );
+
+                if self.channels == 1 {
+                    self.celt_dec.decode_from_range_coder_with_band_range(
+                        &mut rc,
+                        total_bits,
+                        frame_size,
+                        &mut output[..needed],
+                        0,
+                        celt_end_band,
+                    );
+                    for sample in &mut output[..needed] {
+                        *sample = sample.clamp(-1.0, 1.0);
+                    }
+                } else {
+                    self.celt_dec.decode_from_range_coder_with_band_range(
+                        &mut rc,
+                        total_bits,
+                        frame_size,
+                        &mut self.w_celt_planar[..needed],
+                        0,
+                        celt_end_band,
+                    );
+                    for i in 0..frame_size {
+                        for ch in 0..self.channels {
+                            output[i * self.channels + ch] =
+                                self.w_celt_planar[ch * frame_size + i].clamp(-1.0, 1.0);
+                        }
+                    }
+                }
                 self.prev_mode = Some(OpusMode::CeltOnly);
                 Ok(frame_size)
             }
@@ -938,14 +981,19 @@ impl OpusDecoder {
                     )
                 };
 
+                if ret < 0 {
+                    return Err("SILK decoding failed");
+                }
+
                 let silk_out_len = frame_size * self.channels;
                 debug_assert!(silk_out_len <= self.w_silk_out.len());
                 self.w_silk_out[..silk_out_len].fill(0.0);
                 if ret > 0 {
                     let decoded_samples = ret as usize;
                     if self.sampling_rate == internal_sample_rate {
-                        let n = decoded_samples.min(frame_size);
-                        for i in 0..n {
+                        let frames = decoded_samples.min(frame_size);
+                        let total = frames * self.channels;
+                        for i in 0..total {
                             self.w_silk_out[i] = self.w_pcm_i16[i] as f32 / 32768.0;
                         }
                     } else {
@@ -969,7 +1017,9 @@ impl OpusDecoder {
                                 decoded_samples as i32,
                             );
                         }
-                        for i in 0..out_len.min(frame_size) {
+                        let frames = out_len.min(frame_size);
+                        let total = frames * self.channels;
+                        for i in 0..total {
                             self.w_silk_out[i] = self.w_pcm_resampled[i] as f32 / 32768.0;
                         }
                     }
@@ -987,29 +1037,62 @@ impl OpusDecoder {
                 }
 
                 let celt_out_len = frame_size * self.channels;
+                let celt_end_band = self.celt_end_band_from_toc(toc);
                 debug_assert!(celt_out_len <= self.w_celt_out.len());
                 if self.hybrid_skip_celt {
                     self.w_celt_out[..celt_out_len].fill(0.0);
                 } else {
-                    let (celt_dec, celt_out) = (&mut self.celt_dec, &mut self.w_celt_out);
-                    celt_dec.decode_from_range_coder(
+                    let (celt_dec, celt_planar) = (&mut self.celt_dec, &mut self.w_celt_planar);
+                    celt_dec.decode_from_range_coder_with_band_range(
                         &mut rc,
                         total_bits,
                         frame_size,
-                        &mut celt_out[..celt_out_len],
+                        &mut celt_planar[..celt_out_len],
                         17,
+                        celt_end_band,
                     );
+
+                    if self.channels == 1 {
+                        self.w_celt_out[..celt_out_len]
+                            .copy_from_slice(&self.w_celt_planar[..celt_out_len]);
+                    } else {
+                        for i in 0..frame_size {
+                            for ch in 0..self.channels {
+                                self.w_celt_out[i * self.channels + ch] =
+                                    self.w_celt_planar[ch * frame_size + i];
+                            }
+                        }
+                    }
                 }
 
-                let n = frame_size.min(output.len());
-                for i in 0..n {
+                let total = (frame_size * self.channels).min(output.len());
+                for i in 0..total {
                     output[i] = (self.w_silk_out[i] + self.w_celt_out[i]).clamp(-1.0, 1.0);
                 }
 
                 self.prev_mode = Some(OpusMode::Hybrid);
-                Ok(n)
+                Ok(frame_size)
             }
         }
+    }
+}
+
+impl OpusDecoder {
+    #[inline(always)]
+    fn celt_end_band_from_toc(&self, toc: u8) -> usize {
+        let mode = modes::default_mode();
+        let top = mode.eff_ebands;
+        if mode_from_toc(toc) == OpusMode::CeltOnly && toc >= 0x80 {
+            const FROM_OPUS_TABLE: [u8; 16] = [
+                0x80, 0x88, 0x90, 0x98, 0x40, 0x48, 0x50, 0x58, 0x20, 0x28, 0x30, 0x38,
+                0x00, 0x08, 0x10, 0x18,
+            ];
+            let idx = ((toc >> 3) - 16) as usize;
+            let data0 = FROM_OPUS_TABLE[idx] | (toc & 0x7);
+            let trim = (data0 >> 5) as usize;
+            return top.saturating_sub(2 * trim).max(1);
+        }
+        top
     }
 }
 

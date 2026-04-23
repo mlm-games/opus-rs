@@ -1793,7 +1793,7 @@ fn exp_rotation1_scalar(x: &mut [f32], len: usize, stride: usize, c: f32, s: f32
 #[inline(always)]
 #[allow(unsafe_op_in_unsafe_fn)]
 unsafe fn exp_rotation1_neon(x: &mut [f32], len: usize, stride: usize, c: f32, s: f32) {
-    if stride == 1 {
+    if stride < 4 {
         exp_rotation1_scalar(x, len, stride, c, s);
         return;
     }

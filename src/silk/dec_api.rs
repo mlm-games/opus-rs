@@ -1,6 +1,6 @@
 use crate::range_coder::RangeCoder;
 use crate::silk::decode_frame::{FLAG_DECODE_NORMAL, FLAG_PACKET_LOST, silk_decode_frame};
-use crate::silk::decode_indices::silk_decode_indices;
+use crate::silk::decode_indices::{silk_decode_indices, silk_decode_stereo};
 use crate::silk::decode_pulses::silk_decode_pulses;
 use crate::silk::decoder_structs::SilkDecoderState;
 use crate::silk::define::*;
@@ -161,6 +161,11 @@ impl SilkDecoder {
                         );
                     }
                 }
+            }
+
+            if self.n_channels_internal == 2 {
+                let (_side_idx, _pred_idx, only_middle) = silk_decode_stereo(range_dec);
+                self.prev_decode_only_middle = only_middle as i32;
             }
         }
 

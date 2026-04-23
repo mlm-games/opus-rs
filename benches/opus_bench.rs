@@ -97,6 +97,7 @@ fn get_real_audio_frames(sample_rate: u32, frame_ms: usize) -> Vec<Vec<f32>> {
         .collect()
 }
 
+
 fn bench_opus_encode_silk(c: &mut Criterion) {
     let mut group = c.benchmark_group("opus_encode_silk");
 
@@ -577,6 +578,7 @@ fn bench_opus_real(c: &mut Criterion) {
 
     group.finish();
 }
+
 
 fn bench_celt_autocorr(c: &mut Criterion) {
     let mut group = c.benchmark_group("celt_autocorr");
