@@ -110,27 +110,34 @@ fn compute_equiv_rate(
     equiv
 }
 
-fn compute_mode_threshold(application: Application, channels: usize, prev_was_celt: bool) -> i32 {
+fn compute_mode_threshold(
+    application: Application,
+    channels: usize,
+    prev_was_celt: bool,
+    has_prev_mode: bool,
+    voice_est: i32,
+) -> i32 {
     let mode_voice = if channels == 1 { 64000 } else { 44000 };
     let mode_music = 10000;
 
-    let offset = (mode_voice - mode_music) >> 14;
+    let diff = mode_voice - mode_music;
+    let offset = (voice_est * voice_est * diff) >> 14;
     let mut threshold = mode_music + offset;
 
     if application == Application::Voip {
         threshold += 8000;
     }
 
-    if prev_was_celt {
-        threshold -= 4000;
-    } else {
-        threshold += 4000;
+    if has_prev_mode {
+        if prev_was_celt {
+            threshold -= 4000;
+        } else {
+            threshold += 4000;
+        }
     }
 
-    match application {
-        Application::Audio => threshold = threshold.max(55000),
-        Application::Voip => threshold = threshold.max(55000),
-        Application::RestrictedLowDelay => threshold = 0,
+    if application == Application::RestrictedLowDelay {
+        threshold = 0;
     }
 
     threshold
@@ -343,8 +350,20 @@ impl OpusEncoder {
                 self.packet_loss_perc,
             );
             let prev_was_celt = self.prev_enc_mode == Some(OpusMode::CeltOnly);
-            let threshold = compute_mode_threshold(self.application, self.channels, prev_was_celt);
-            if equiv >= threshold {
+            let has_prev_mode = self.prev_enc_mode.is_some();
+            let voice_est = match self.application {
+                Application::Voip => 115,
+                Application::Audio => 48,
+                Application::RestrictedLowDelay => 0,
+            };
+            let threshold = compute_mode_threshold(
+                self.application,
+                self.channels,
+                prev_was_celt,
+                has_prev_mode,
+                voice_est,
+            );
+            if equiv >= threshold && self.sampling_rate >= 24000 {
                 OpusMode::CeltOnly
             } else {
                 OpusMode::SilkOnly
@@ -382,8 +401,6 @@ impl OpusEncoder {
 
         let n_bytes = cbr_bytes.min(max_data_bytes).max(1);
 
-        // Initialize range coder with CBR-capped buffer size, matching C's
-        // ec_enc_init(&enc, data, max_data_bytes-1) where max_data_bytes is CBR-capped.
         let init_rc_size = n_bytes - 1;
         self.rc.reset_for_encode(init_rc_size as u32);
 
@@ -550,9 +567,6 @@ impl OpusEncoder {
                     as i32
             };
             let silk_max_bits = if mode == OpusMode::Hybrid {
-                // Match C: for VBR Hybrid, maxBits starts at (max_data_bytes-1)*8,
-                // then constrained via compute_silk_rate_for_hybrid.
-                // For CBR Hybrid, allow SILK to steal up to 25% of remaining bits.
                 let total_max_bits = ((n_bytes - 1) * 8) as i32;
                 if self.use_cbr {
                     let silk_bits = (silk_bitrate as i64 * silk_frame_len as i64
@@ -560,7 +574,6 @@ impl OpusEncoder {
                     let other_bits = 0i32.max(total_max_bits - silk_bits);
                     0i32.max(total_max_bits - other_bits * 3 / 4)
                 } else {
-                    // Constrained VBR: compute max SILK bits from total budget
                     let frame_duration_ms = frame_size as i32 * 1000 / self.sampling_rate;
                     let frame20ms = frame_duration_ms >= 20;
                     let max_bit_rate = compute_silk_rate_for_hybrid(
@@ -572,7 +585,6 @@ impl OpusEncoder {
             } else {
                 ((n_bytes - 1) * 8) as i32
             };
-            // For Hybrid CBR, force SILK to use VBR (matching C behavior)
             let silk_use_cbr = if mode == OpusMode::Hybrid && self.use_cbr {
                 0
             } else if self.use_cbr {

@@ -8,7 +8,7 @@ fn test_48k_hybrid_quality_audio() {
     let total_samples = frame_size * num_frames;
 
     let mut encoder = OpusEncoder::new(sample_rate, 1, Application::Audio).unwrap();
-    encoder.bitrate_bps = 32000;
+    encoder.bitrate_bps = 18000;
     encoder.use_cbr = true;
 
     let mut decoder = OpusDecoder::new(sample_rate, 1).unwrap();
